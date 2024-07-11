@@ -10,6 +10,7 @@ from typing import Optional, Tuple, Union
 import torch
 import torchaudio
 from torch import Tensor
+from torchaudio.transforms import Spectrogram
 from torch.nn import Module
 
 from .common_utils import _get_feat_lens_paths
@@ -55,16 +56,22 @@ def extract_feature_mfcc(
     """
     waveform, sr = torchaudio.load(path)
     assert sr == sample_rate
-    feature_extractor = torchaudio.transforms.MFCC(
-        sample_rate=sample_rate, n_mfcc=13, melkwargs={"n_fft": 400, "hop_length": 160, "center": False}
-    ).to(device)
-    waveform = waveform[0].to(device)
-    mfccs = feature_extractor(waveform)  # (freq, time)
-    deltas = torchaudio.functional.compute_deltas(mfccs)
-    ddeltas = torchaudio.functional.compute_deltas(deltas)
-    concat = torch.cat([mfccs, deltas, ddeltas], dim=0)
-    feat = concat.transpose(0, 1)  # (time, freq)
-    return feat
+    waveform = waveform.to(device)
+
+    spectrogram_transform = Spectrogram(n_fft=400, hop_length=160, center=False).to(device)
+    spectrogram = spectrogram_transform(waveform)  # (channel, freq, time)
+
+    spectrogram = spectrogram.permute(2, 0, 1)
+    if spectrogram.size(1) == 1:
+        spectrogram = spectrogram.expand(-1, 3, -1)
+
+    # waveform = waveform[0].to(device)
+    # mfccs = feature_extractor(waveform)  # (freq, time)
+    # deltas = torchaudio.functional.compute_deltas(mfccs)
+    # ddeltas = torchaudio.functional.compute_deltas(deltas)
+    # concat = torch.cat([mfccs, deltas, ddeltas], dim=0)
+    # feat = concat.transpose(0, 1)  # (time, freq)
+    return spectrogram
 
 
 def extract_feature_hubert(
