@@ -8,6 +8,7 @@ import logging
 import pathlib
 from argparse import ArgumentDefaultsHelpFormatter, ArgumentParser, RawDescriptionHelpFormatter
 from typing import Tuple
+import soundsig_patch  # Must come before any import that uses soundsig
 
 from lightning.pytorch import seed_everything, Trainer
 from lightning.pytorch.callbacks import ModelCheckpoint
@@ -27,6 +28,7 @@ class _Formatter(ArgumentDefaultsHelpFormatter, RawDescriptionHelpFormatter):
 
 def run_train(args):
     seed_everything(1337)
+    print(f"GPUs requested {args.gpus}, dataset {args.dataset},  nodes {args.num_nodes}")
     checkpoint_dir = args.exp_dir / f"checkpoints_{args.dataset}_{args.model_name}"
     checkpoint = ModelCheckpoint(
         checkpoint_dir,
@@ -131,7 +133,7 @@ def _parse_args():
     parser.add_argument(
         "--dataset",
         default="librispeech",
-        choices=["librispeech", "librilight"],
+        choices=["short_zebra_finch", "librilight"],
         type=str,
         help="The dataset for training. (Default: 'librispeech')",
     )
@@ -167,7 +169,7 @@ def _parse_args():
     )
     parser.add_argument(
         "--num-nodes",
-        default=4,
+        default=1,
         type=int,
         help="Number of nodes to use for training. (Default: 4)",
     )

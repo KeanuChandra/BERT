@@ -300,23 +300,24 @@ class HuBERTPreTrainModule(LightningModule):
         )
         return dataloader
 
-    def val_dataloader(self):
-        dataset = HuBERTDataSet(self.dataset_path, self.dataset, "valid")
-        sampler = BucketizeBatchSampler(
-            dataset.len_list,
-            num_buckets=1000,
-            max_token_count=self.seconds_per_batch * 16000,
-            min_len=32000,
-            max_len=250000,
-            shuffle=False,
-        )
-        dataloader = DataLoader(
-            dataset,
-            batch_sampler=sampler,
-            collate_fn=CollateFnHubert(feature_type=self.feature_type, pad=False, rand_crop=True),
-            num_workers=10,
-        )
-        return dataloader
+    #def val_dataloader(self):
+        #dataset = HuBERTDataSet(self.dataset_path, self.dataset, "valid")
+        #sampler = BucketizeBatchSampler(
+        #    dataset.len_list,
+        #    num_buckets=1000,
+        #    max_token_count=self.seconds_per_batch * 16000,
+        #    min_len=32000,
+        #    max_len=250000,
+        #    shuffle=False,
+        #)
+        #dataloader = DataLoader(
+        #    dataset,
+        #    batch_sampler=sampler,
+        #    collate_fn=CollateFnHubert(feature_type=self.feature_type, pad=False, rand_crop=True),
+        #    num_workers=10,
+        #)
+        #return None 
+        # return dataloader # disable validation for pretraining
 
 
 class HuBERTFineTuneModule(LightningModule):

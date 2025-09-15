@@ -10,13 +10,21 @@ from typing import Optional, Tuple, Union
 import torch
 import torchaudio
 from torch import Tensor
+from torch import vmap
 from torchaudio.transforms import Spectrogram
 from torch.nn import Module
+import matplotlib.pyplot as plt
+import torch.nn.functional as F
+import os
+import numpy as np
+from soundsig.sound import spectrogram, plot_spectrogram
 
 from .common_utils import _get_feat_lens_paths
 
 _LG = logging.getLogger(__name__)
 _DEFAULT_DEVICE = torch.device("cpu")
+debug = True
+output_specs = 0
 
 
 def get_shard_range(num_lines: int, num_rank: int, rank: int) -> Tuple[int, int]:
@@ -43,6 +51,7 @@ def extract_feature_mfcc(
     path: str,
     device: torch.device,
     sample_rate: int,
+    segment_duration: int = 5,
 ) -> Tensor:
     r"""Extract MFCC features for KMeans clustering and pseudo label prediction.
     Args:
@@ -58,12 +67,59 @@ def extract_feature_mfcc(
     assert sr == sample_rate
     waveform = waveform.to(device)
 
-    spectrogram_transform = Spectrogram(n_fft=400, hop_length=160, center=False).to(device)
-    spectrogram = spectrogram_transform(waveform)  # (channel, freq, time)
+    segment_samples = sr * segment_duration
 
-    spectrogram = spectrogram.permute(2, 0, 1)
-    if spectrogram.size(1) == 1:
-        spectrogram = spectrogram.expand(-1, 3, -1)
+    # Pad waveform if not a multiple of 5 seconds
+    num_total_samples = waveform.shape[1]
+    pad_len = (segment_samples - num_total_samples % segment_samples) % segment_samples
+    if pad_len > 0:
+        waveform = torch.nn.functional.pad(waveform, (0, pad_len))
+    
+    # Split into segments
+    segments = waveform.unfold(dimension=1, size=segment_samples, step=segment_samples)
+    # segments = segments.squeeze(0)
+
+    def f(segment):
+        segment = segment
+        t, freq, spec, rms = spectrogram(segment, 16000, 100, 40)
+        global debug
+        global output_specs
+        if debug and output_specs <= 2:
+            print("debugging", output_specs)
+            plot_spectrogram(t, freq, spec)
+            output_path = f"/global/scratch/users/jonathanswang/temp_files/mfcc/vocspectrogram{output_specs}.png"
+            os.makedirs(os.path.dirname(output_path), exist_ok=True)
+
+            torch.save(spec, f"/global/scratch/users/jonathanswang/temp_files/mfcc/vocspectrogram{output_specs}.pt")
+
+            plt.savefig(output_path)
+            plt.close()
+
+            output_specs += 1
+        return np.abs(spec)
+
+    spectrograms = []
+    for i in range(segments.shape[1]):
+        segment = segments[:, i, :]  # (channel, segment_samples)
+        segment = segment.squeeze(-1)
+        segment = segment.squeeze(0)
+        spec = f(segment)
+        spectrograms.append(torch.from_numpy(spec))
+
+    spectrograms = torch.stack(spectrograms)  # not cat
+
+    # spectrograms = vmap(f)(segments)
+
+    frames_per_20ms = 2 # hop length is 10ms so 2 hop lengths = 20ms
+    features = torch.split(spectrograms, frames_per_20ms, dim=1)
+
+    flattened = [t.reshape(t.shape[0], -1) for t in features]  # each becomes (N, M)
+    target_len = flattened[0].shape[1]
+    flattened = [F.pad(t, (0, target_len - t.shape[1])) if t.shape[1] < target_len else t for t in flattened]
+    stacked = torch.cat(flattened, dim=0)  # final shape: (len(tensor_list) * 1136, M)
+
+    # if spectrogram.size(1) == 1:
+    #     spectrogram = spectrogram.expand(-1, 3, -1)
 
     # waveform = waveform[0].to(device)
     # mfccs = feature_extractor(waveform)  # (freq, time)
@@ -71,7 +127,9 @@ def extract_feature_mfcc(
     # ddeltas = torchaudio.functional.compute_deltas(deltas)
     # concat = torch.cat([mfccs, deltas, ddeltas], dim=0)
     # feat = concat.transpose(0, 1)  # (time, freq)
-    return spectrogram
+    # import matplotlib.pyplot as plt
+    #
+    return stacked
 
 
 def extract_feature_hubert(
@@ -174,19 +232,25 @@ def dump_features(
     with open(tsv_file, "r") as f:
         root = f.readline().rstrip()
         lines = [line.rstrip() for line in f]
-        start, end = get_shard_range(len(lines), num_rank, rank)
+        start, end = 0, 0
+        if len(lines) == 1:
+            start, end = 0, 1
+        elif len(lines) != 0:
+            start, end = get_shard_range(len(lines), num_rank, rank)
         lines = lines[start:end]
         for line in lines:
             path, nsample = line.split("\t")
             path = f"{root}/{path}"
-            nsample = int(nsample)
             if feature_type == "mfcc":
                 feature = extract_feature_mfcc(path, device, sample_rate)
             else:
                 feature = extract_feature_hubert(path, device, sample_rate, model, layer_index)
             features.append(feature.cpu())
             lens.append(feature.shape[0])
-    features = torch.cat(features)
+    if len(features) != 0:
+        features = torch.cat(features)
+    else:
+        features = torch.empty(0, 0)
     lens = torch.Tensor(lens)
     torch.save(features, feat_path)
     torch.save(lens, len_path)

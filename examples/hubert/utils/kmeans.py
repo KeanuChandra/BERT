@@ -38,8 +38,8 @@ def load_feature(
     lens = []
     for rank in range(1, num_rank + 1):
         feat_path, len_path = _get_feat_lens_paths(feat_dir, split, rank, num_rank)
-        feat = torch.load(feat_path)
-        length = torch.load(len_path).int()
+        feat = torch.load(feat_path, weights_only=True)
+        length = torch.load(len_path, weights_only=True).int()
         if percent < 0:
             feats.append(feat)
             lens.append(length)

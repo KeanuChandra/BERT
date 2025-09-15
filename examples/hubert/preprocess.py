@@ -7,13 +7,18 @@ The script includes:
     - Pseudo-label generation
 """
 import logging
+import scipy.signal.windows as windows
+import scipy.signal
+scipy.signal.hann = windows.hann
+
 from soundsig.signal import lowpass_filter, bandpass_filter, resample_signal
 from argparse import ArgumentParser, RawTextHelpFormatter
 from pathlib import Path
 
 import torch
 import torchaudio
-from typing import Union, Optional
+from joblib import Parallel, delayed
+from typing import Union
 from utils import create_tsv, dump_features, get_km_label, learn_kmeans
 
 
@@ -31,10 +36,10 @@ def _parse_args():
         formatter_class=RawTextHelpFormatter,
     )
     parser.add_argument("--debug", action="store_true", help="Enable debug log")
-    parser.add_argument("--dataset", default="librispeech", type=str, choices=["librispeech", "librilight"])
+    parser.add_argument("--dataset", default="short_zebra_finch", type=str, choices=["librispeech", "librilight","short_zebra_finch"])
     parser.add_argument(
         "--root-dir",
-        default="/Users/jonathanwang/Desktop/vocalizations_lab/datasets/LibriSpeech",
+        default="/Users/jonathanwang/Desktop/vocalizations_lab/datasets/Zebra_Finch_Dataset/dataset",
         type=Path,
         help="The path to the directory where the directory ``LibriSpeech`` or ``LibriLight`` is stored.",
     )
@@ -72,17 +77,27 @@ def _parse_args():
         type=float,
         help="The percent of data for KMeans clustering. If negative, use all data. (Default: -1)",
     )
+    parser.add_argument(
+        "--valid",
+        default=False,
+        type=bool,
+        help="Whether to create a validation set. (Default: False)",
+    )
     args = parser.parse_args()
     return args
 
 
 def resample_and_save_audio(input_path: Path, output_path: Path, orig_freq: int, new_freq: int,
-                            low_freq=100, high_freq=8000, filter_order=4, rescale=False, chunk_size=10):
+                            low_freq=100, high_freq=8000, filter_order=5, rescale=False, chunk_size=10):
     waveform, sr = torchaudio.load(input_path)
     assert sr == orig_freq, "Sample rate mismatch"
 
     chunk_samples = orig_freq * chunk_size
     num_chunks = (waveform.size(1) + chunk_samples - 1) // chunk_samples  # Ceiling division
+    if waveform.shape[0] > 1:
+        # Take the mean across the channels (shape: (n_channels, n_time) -> (n_time))
+        waveform = waveform.mean(dim=0)
+        waveform = waveform.unsqueeze(0)  # Now shape is [1, samples]
 
     resampled_waveform = []
 
@@ -90,12 +105,12 @@ def resample_and_save_audio(input_path: Path, output_path: Path, orig_freq: int,
         start = i * chunk_samples
         end = min(start + chunk_samples, waveform.size(1))
         chunk = waveform[:, start:end]
-        resampled_chunk = bandpass_filter(chunk, sr, low_freq, high_freq, filter_order, rescale)
-        filtered_chunk = resample_signal(resampled_chunk, sr, new_freq)
-        resampled_waveform.append(filtered_chunk)
+        resampled_chunk = bandpass_filter(chunk, sr, low_freq, high_freq, filter_order, rescale).squeeze(0)
+        t_rs, filtered_chunk = resample_signal(resampled_chunk, sr, new_freq)
+        resampled_waveform.append(torch.tensor(filtered_chunk))
 
     # Concatenate all chunks along the time dimension
-    resampled_waveform = torch.cat(resampled_waveform, dim=1)
+    resampled_waveform = torch.cat(resampled_waveform).unsqueeze(0)
 
     # Save the resampled and filtered waveform
     torchaudio.save(output_path, resampled_waveform, new_freq)
@@ -109,9 +124,7 @@ def preprocess_and_save_all(tsv_file: Union[str, Path], output_dir: Union[str, P
         root = f.readline().rstrip()
         lines = [line.rstrip() for line in f]
 
-    new_lines = []
-
-    for line in lines:
+    def preprocess_and_save(line):
         path, nsample = line.split("\t")
         input_path = Path(root) / path
         output_path = output_dir / Path(path).name
@@ -119,8 +132,9 @@ def preprocess_and_save_all(tsv_file: Union[str, Path], output_dir: Union[str, P
         resample_and_save_audio(input_path, output_path, orig_freq, new_freq)
 
         # Update the path to the new preprocessed file
-        new_line = f"{output_path.relative_to(output_dir.parent)}\t{nsample}"
-        new_lines.append(new_line)
+        return f"{output_path.relative_to(output_dir.parent)}\t{nsample}"
+
+    new_lines = Parallel(n_jobs=-1)(delayed(preprocess_and_save)(line) for line in lines)
 
     return new_lines
 
@@ -136,6 +150,10 @@ def main(args):
         data_dir = args.exp_dir / "data" / f"{args.feat_type}_{args.layer_index}"
     data_dir.mkdir(parents=True, exist_ok=True)
 
+    split_sets = ["train"]
+    if args.valid:
+        split_sets.append("valid")
+
     tsv_dir = data_dir / "tsv"
     feat_dir = data_dir / "feat"
     km_dir = data_dir / "km_model"
@@ -147,11 +165,11 @@ def main(args):
         device = torch.device("cpu")
 
     # Create file lists for training and validation (optional)
-    create_tsv(args.root_dir, tsv_dir)
+    create_tsv(args.root_dir, tsv_dir, args.dataset, extension="wav")
 
     # Preprocess and save audio files
     preprocessed_audio_dir = data_dir / "preprocessed_audio"
-    for split in ["train", "valid"]:
+    for split in split_sets:
         new_lines = preprocess_and_save_all(
             tsv_dir / f"{args.dataset}_{split}.tsv",
             preprocessed_audio_dir,
@@ -165,7 +183,7 @@ def main(args):
 
         # Write new TSV file with preprocessed audio paths
         with open(old_tsv_file, "w") as f:
-            f.write(f"{preprocessed_audio_dir.relative_to(tsv_dir.parent)}\n")
+            f.write(f"{data_dir}\n")
             for new_line in new_lines:
                 f.write(f"{new_line}\n")
 
@@ -173,20 +191,19 @@ def main(args):
     if not feat_dir.exists():
         feat_dir.mkdir()
 
-    for split in ["train", "valid"]:
-        for rank in range(1, args.num_rank + 1):
-            dump_features(
-                tsv_dir / f"{args.dataset}_{split}.tsv",
-                feat_dir,
-                split,
-                rank,
-                args.num_rank,
-                device,
-                args.feat_type,
-                args.layer_index,
-                args.checkpoint_path,
-                16_000,
-            )
+    for split in split_sets:
+        Parallel(n_jobs=-1)(delayed(dump_features)(
+            tsv_dir / f"{args.dataset}_{split}.tsv",
+            feat_dir,
+            split,
+            rank,
+            args.num_rank,
+            device,
+            args.feat_type,
+            args.layer_index,
+            args.checkpoint_path,
+            16_000,
+        ) for rank in range(1, args.num_rank + 1))
 
     # Fit KMeans clustering model
     learn_kmeans(
@@ -199,7 +216,7 @@ def main(args):
     )
 
     # Predict labels for MFCC or HuBERT features
-    for split in ["train", "valid"]:
+    for split in split_sets:
         get_km_label(
             feat_dir,
             km_dir,
