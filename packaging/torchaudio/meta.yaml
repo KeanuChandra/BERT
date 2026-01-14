@@ -14,7 +14,6 @@ requirements:
   host:
     - python
     - setuptools
-    - cmake
     - ninja
     - pytorch-mutex 1.0 {{ build_variant }}  # [not osx ]
     {{ environ.get('CONDA_PYTORCH_BUILD_CONSTRAINT', 'pytorch') }}
@@ -43,17 +42,13 @@ build:
     - USE_CUDA
     - CUDA_HOME
     - TORCH_CUDA_ARCH_LIST
-    - USE_FFMPEG
     - USE_OPENMP
     - MACOSX_DEPLOYMENT_TARGET
 
 test:
   imports:
     - torchaudio
-    - torchaudio.io
     - torchaudio.datasets
-    - torchaudio.kaldi_io
-    - torchaudio.sox_effects
     - torchaudio.transforms
 
   source_files:

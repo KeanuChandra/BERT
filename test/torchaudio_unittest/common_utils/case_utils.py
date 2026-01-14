@@ -9,11 +9,8 @@ import unittest
 from itertools import zip_longest
 
 import torch
-import torchaudio
-import torio
 from torch.testing._internal.common_utils import TestCase as PytorchTestCase
 from torchaudio._internal.module_utils import eval_env, is_module_available
-from torchaudio.utils.ffmpeg_utils import get_video_decoders, get_video_encoders
 
 
 class TempDirMixin:
@@ -108,8 +105,6 @@ class TorchaudioTestCase(TestBaseMixin, PytorchTestCase):
     pass
 
 
-_IS_FFMPEG_AVAILABLE = torio._extension.lazy_import_ffmpeg_ext().is_available()
-_IS_SOX_AVAILABLE = torchaudio._extension.lazy_import_sox_ext().is_available()
 _IS_CTC_DECODER_AVAILABLE = None
 _IS_CUDA_CTC_DECODER_AVAILABLE = None
 
@@ -206,34 +201,6 @@ skipIfCudaSmallMemory = _skipIf(
     reason="CUDA does not have enough memory.",
     key="CUDA_SMALL_MEMORY",
 )
-skipIfNoSox = _skipIf(
-    not _IS_SOX_AVAILABLE,
-    reason="Sox features are not available.",
-    key="NO_SOX",
-)
-
-
-def skipIfNoSoxDecoder(ext):
-    return _skipIf(
-        not _IS_SOX_AVAILABLE or ext not in torchaudio.utils.sox_utils.list_read_formats(),
-        f'sox does not handle "{ext}" for read.',
-        key="NO_SOX_DECODER",
-    )
-
-
-def skipIfNoSoxEncoder(ext):
-    return _skipIf(
-        not _IS_SOX_AVAILABLE or ext not in torchaudio.utils.sox_utils.list_write_formats(),
-        f'sox does not handle "{ext}" for write.',
-        key="NO_SOX_ENCODER",
-    )
-
-
-skipIfNoRIR = _skipIf(
-    not torchaudio._extension._IS_RIR_AVAILABLE,
-    reason="RIR features are not available.",
-    key="NO_RIR",
-)
 skipIfNoCtcDecoder = _skipIf(
     not is_ctc_decoder_available(),
     reason="CTC decoder not available.",
@@ -255,7 +222,7 @@ skipIfNoQengine = _skipIf(
     key="NO_QUANTIZATION",
 )
 skipIfNoFFmpeg = _skipIf(
-    not _IS_FFMPEG_AVAILABLE,
+    True,
     reason="ffmpeg features are not available.",
     key="NO_FFMPEG",
 )
@@ -268,7 +235,7 @@ skipIfPy310 = _skipIf(
     key="ON_PYTHON_310",
 )
 skipIfNoAudioDevice = _skipIf(
-    not (_IS_FFMPEG_AVAILABLE and torchaudio.utils.ffmpeg_utils.get_output_devices()),
+    True,
     reason="No output audio device is available.",
     key="NO_AUDIO_OUT_DEVICE",
 )
@@ -282,19 +249,20 @@ disabledInCI = _skipIf(
     reason="Tests are failing on CI consistently. Disabled while investigating.",
     key="TEMPORARY_DISABLED",
 )
+skipIfSingleCuda = _skipIf(
+    not (torch.cuda.is_available() and torch.cuda.device_count() > 1),
+    reason=(
+        "CUDA is not available."
+        if not torch.cuda.is_available()
+        else f"Not a multi-GPU platform (device count is {torch.cuda.device_count()})."
+    ),
+    key="NO_MULTIGPU_CUDA",
+)
 
 
 def skipIfNoHWAccel(name):
     key = "NO_HW_ACCEL"
-    if not _IS_FFMPEG_AVAILABLE:
-        return _skipIf(True, reason="ffmpeg features are not available.", key=key)
-    if not torch.cuda.is_available():
-        return _skipIf(True, reason="CUDA is not available.", key=key)
-    if torchaudio._extension._check_cuda_version() is None:
-        return _skipIf(True, "Torchaudio is not compiled with CUDA.", key=key)
-    if name not in get_video_decoders() and name not in get_video_encoders():
-        return _skipIf(True, f"{name} is not in the list of available decoders or encoders", key=key)
-    return _pass
+    return _skipIf(True, reason="ffmpeg features are not available.", key=key)
 
 
 def zip_equal(*iterables):

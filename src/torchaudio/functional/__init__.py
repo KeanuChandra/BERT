@@ -23,11 +23,11 @@ from .filtering import (
     treble_biquad,
     vad,
 )
+
 from .functional import (
     add_noise,
     amplitude_to_DB,
     apply_beamforming,
-    apply_codec,
     compute_deltas,
     convolve,
     create_dct,
@@ -106,7 +106,6 @@ __all__ = [
     "riaa_biquad",
     "treble_biquad",
     "vad",
-    "apply_codec",
     "resample",
     "edit_distance",
     "pitch_shift",

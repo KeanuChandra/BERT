@@ -1,11 +1,13 @@
-#include <ATen/core/TensorAccessor.h>
-#include <ATen/cuda/CUDAContext.h>
-#include <c10/cuda/CUDAException.h>
-#include <limits.h>
-#include <torch/torch.h>
-#include <cub/cub.cuh>
+#include <libtorchaudio/cuda_utils.h>
+#include <libtorchaudio/utils.h>
+#include <torch/csrc/stable/library.h>
+#include <torch/csrc/stable/macros.h>
+#include <torch/headeronly/core/Dispatch_v2.h>
+#include <torch/headeronly/core/ScalarType.h>
 
-using namespace torch::indexing;
+#include <cub/cub.cuh>
+#include <limits.h>
+
 namespace {
 constexpr int kNumThreads =
     1024; // Number of threads to run CUDA kernel in parallel.
@@ -16,11 +18,15 @@ constexpr int kBackPtrBufferSize =
 namespace torchaudio {
 namespace alignment {
 namespace gpu {
+
+using torch::stable::Tensor;
+using torch::headeronly::ScalarType;
+
 template <typename scalar_t, typename target_t>
 __global__ void falign_cuda_step_kernel(
-    const torch::PackedTensorAccessor32<scalar_t, 3, torch::RestrictPtrTraits>
+    const torchaudio::PackedTensorAccessor32<scalar_t, 3>
         logProbs_a,
-    const torch::PackedTensorAccessor32<target_t, 2, torch::RestrictPtrTraits>
+    const torchaudio::PackedTensorAccessor32<target_t, 2>
         targets_a,
     const int T,
     const int L,
@@ -31,9 +37,9 @@ __global__ void falign_cuda_step_kernel(
     int start,
     int end,
     int backPtrBufferLen,
-    torch::PackedTensorAccessor32<scalar_t, 2, torch::RestrictPtrTraits>
+    torchaudio::PackedTensorAccessor32<scalar_t, 2>
         alphas_a,
-    torch::PackedTensorAccessor32<int8_t, 2, torch::RestrictPtrTraits>
+    torchaudio::PackedTensorAccessor32<int8_t, 2>
         backPtrBuffer_a) {
   scalar_t kNegInfinity = -std::numeric_limits<scalar_t>::infinity();
   const int batchIndex =
@@ -94,7 +100,11 @@ __global__ void falign_cuda_step_kernel(
     alphas_a[curIdxOffset][i] = result + logProbs_a[batchIndex][t][labelIdx];
     threadMax = max(threadMax, alphas_a[curIdxOffset][i]);
   }
+#if CUDART_VERSION >= 12090  // CUDA 12.9 and later
+  scalar_t maxResult = BlockReduce(tempStorage).Reduce(threadMax, thrust::maximum<scalar_t>());
+#else
   scalar_t maxResult = BlockReduce(tempStorage).Reduce(threadMax, cub::Max());
+#endif
   if (threadIdx.x == 0) {
     maxValue = maxResult;
   }
@@ -105,52 +115,45 @@ __global__ void falign_cuda_step_kernel(
   }
 }
 
-template <typename scalar_t, torch::ScalarType target_scalar_type>
+template <typename scalar_t, typename target_t>
 void forced_align_impl(
-    const torch::Tensor& logProbs,
-    const torch::Tensor& targets,
+    const Tensor& logProbs,
+    const Tensor& targets,
     const int64_t blank,
-    torch::Tensor& paths) {
-  auto defaultStream = at::cuda::getCurrentCUDAStream();
-  auto cpuDataTranferStream = at::cuda::getStreamFromPool();
+    Tensor& paths) {
+  auto device_index = logProbs.get_device_index();
+  const torch::stable::accelerator::DeviceGuard device_guard(device_index);
+  auto defaultStream = libtorchaudio::cuda::getCurrentCUDAStream(device_index);
+  auto cpuDataTranferStream = libtorchaudio::cuda::getStreamFromPool(false, device_index);
   const scalar_t kNegInfinity = -std::numeric_limits<scalar_t>::infinity();
-  using target_t = typename std::
-      conditional<target_scalar_type == torch::kInt, int, int64_t>::type;
-  auto paths_a = paths.accessor<target_t, 2>();
+  auto paths_a = torchaudio::accessor<target_t, 2>(paths);
   const int batchIndex =
       0; // TODO: support batch version and use the real batch index
   const int T = logProbs.size(1); // num frames
   const int N = logProbs.size(2); // alphabet size
   const int L = targets.size(1); // label length
   const int S = 2 * L + 1;
-  auto targetsCpu = targets.to(torch::kCPU);
+
+  auto cpu_device = torch::stable::Device("cpu");
+  auto targetsCpu = torch::stable::to(targets, cpu_device);
   // backPtrBuffer stores the index offset fthe best path at current position
   // We copy the values to CPU after running every kBackPtrBufferSize of
   // frames.
-  torch::Tensor backPtrBuffer =
-      torch::empty(
-          {min(kBackPtrBufferSize, T), S},
-          torch::TensorOptions().dtype(torch::kInt8).device(logProbs.device()))
-          .contiguous()
-          .fill_(-1);
-  torch::Tensor backPtrCpu =
-      torch::empty(
-          {T, S},
-          torch::TensorOptions().dtype(torch::kInt8).device(torch::kCPU))
-          .contiguous()
-          .fill_(-1);
+  Tensor backPtrBuffer = torch::stable::new_empty(logProbs, {min(kBackPtrBufferSize, T), S}, ScalarType::Char);
+  torch::stable::fill_(backPtrBuffer, -1);
+
+  Tensor backPtrCpu = torch::stable::new_empty(targetsCpu, {T, S}, ScalarType::Char);
+  torch::stable::fill_(backPtrCpu, -1);
+
   // we store only two time frames for alphas
   // alphas for compute current timeframe can be computed only from previous
   // time frame.
-  torch::Tensor alphas = torch::empty(
-                             {2, S},
-                             torch::TensorOptions()
-                                 .dtype(logProbs.dtype())
-                                 .device(logProbs.device()))
-                             .fill_(kNegInfinity);
+  Tensor alphas = torch::stable::new_empty(logProbs, {2, S});
+  torch::stable::fill_(alphas, kNegInfinity);
+
   // CPU accessors
-  auto targetsCpu_a = targetsCpu.accessor<target_t, 2>();
-  auto backPtrCpu_a = backPtrCpu.accessor<int8_t, 2>();
+  auto targetsCpu_a = torchaudio::accessor<target_t, 2>(targetsCpu);
+  auto backPtrCpu_a = torchaudio::accessor<int8_t, 2>(backPtrCpu);
   // count the number of repeats in label
   int R = 0;
   for (int i = 1; i < L; ++i) {
@@ -158,7 +161,7 @@ void forced_align_impl(
       ++R;
     }
   }
-  TORCH_CHECK(
+  STD_TORCH_CHECK(
       T >= L + R,
       "targets length is too long for CTC. Found log_probs length: ",
       T,
@@ -169,7 +172,7 @@ void forced_align_impl(
   int start = (T - (L + R)) > 0 ? 0 : 1;
   int end = (S == 1) ? 1 : 2;
   int backPtrBufferLen = 0;
-  torch::Tensor bufferCopy;
+  Tensor bufferCopy;
   for (int t = 0; t < T; ++t) {
     if (t > 0) {
       if (T - t <= L + R) {
@@ -191,8 +194,8 @@ void forced_align_impl(
     }
     falign_cuda_step_kernel<scalar_t, target_t>
         <<<1, kNumThreads, 0, defaultStream>>>(
-            logProbs.packed_accessor32<scalar_t, 3, torch::RestrictPtrTraits>(),
-            targets.packed_accessor32<target_t, 2, torch::RestrictPtrTraits>(),
+            torchaudio::packed_accessor32<scalar_t, 3>(logProbs),
+            torchaudio::packed_accessor32<target_t, 2>(targets),
             T,
             L,
             N,
@@ -202,121 +205,117 @@ void forced_align_impl(
             start,
             end,
             backPtrBufferLen,
-            alphas.packed_accessor32<scalar_t, 2, torch::RestrictPtrTraits>(),
-            backPtrBuffer
-                .packed_accessor32<int8_t, 2, torch::RestrictPtrTraits>());
-    C10_CUDA_KERNEL_LAUNCH_CHECK();
+            torchaudio::packed_accessor32<scalar_t, 2>(alphas),
+            torchaudio::packed_accessor32<int8_t, 2>(backPtrBuffer));
+    STD_CUDA_KERNEL_LAUNCH_CHECK();
     ++backPtrBufferLen;
     if (backPtrBufferLen == kBackPtrBufferSize || t == T - 1) {
-      cpuDataTranferStream.synchronize();
+      libtorchaudio::cuda::synchronize(cpuDataTranferStream, device_index);
       // GPU -> GPU copy
-      bufferCopy = backPtrBuffer.clone().contiguous();
-      defaultStream.synchronize();
-      at::cuda::setCurrentCUDAStream(cpuDataTranferStream);
+      bufferCopy = torch::stable::clone(backPtrBuffer);
+      STD_TORCH_CHECK(bufferCopy.is_contiguous(), "unexpected fail, need to implement stable::Tensor::contiguous()")
+      libtorchaudio::cuda::synchronize(defaultStream, device_index);
+      libtorchaudio::cuda::setCurrentCUDAStream(cpuDataTranferStream, device_index);
       // Copy ASYNC from GPU to CPU
       int64_t offset =
           static_cast<int64_t>(t + 1 - backPtrBufferLen) * S * sizeof(int8_t);
-      C10_CUDA_CHECK(cudaMemcpyAsync(
+      STD_CUDA_CHECK(cudaMemcpyAsync(
           static_cast<int8_t*>(backPtrCpu.data_ptr()) + offset,
           bufferCopy.data_ptr(),
           backPtrBufferLen * S * sizeof(int8_t),
           cudaMemcpyDeviceToHost,
           cpuDataTranferStream));
-      at::cuda::setCurrentCUDAStream(defaultStream);
+      libtorchaudio::cuda::setCurrentCUDAStream(defaultStream, device_index);
       backPtrBufferLen = 0;
     }
   }
-  cpuDataTranferStream.synchronize();
-  torch::Tensor alphasCpu = alphas.to(torch::kCPU);
-  auto alphasCpu_a = alphasCpu.accessor<scalar_t, 2>();
+  libtorchaudio::cuda::synchronize(cpuDataTranferStream, device_index);
+  auto alphasCpu = torch::stable::to(alphas, cpu_device);
+  auto alphasCpu_a = torchaudio::accessor<scalar_t, 2>(alphasCpu);
   int curIdxOffset = ((T - 1) % 2);
   int ltrIdx =
       alphasCpu_a[curIdxOffset][S - 1] > alphasCpu_a[curIdxOffset][S - 2]
       ? S - 1
       : S - 2;
-  int indexScores = 0;
   for (int t = T - 1; t >= 0; --t) {
     auto lbl_idx =
         ltrIdx % 2 == 0 ? blank : targetsCpu_a[batchIndex][ltrIdx / 2];
     paths_a[batchIndex][t] = lbl_idx;
-    ++indexScores;
     ltrIdx -= backPtrCpu_a[t][ltrIdx];
   }
 }
 
-std::tuple<torch::Tensor, torch::Tensor> compute(
-    const torch::Tensor& logProbs,
-    const torch::Tensor& targets,
-    const torch::Tensor& inputLengths,
-    const torch::Tensor& targetLengths,
+std::tuple<Tensor, Tensor> compute(
+    Tensor logProbs,
+    Tensor targets,
+    Tensor inputLengths,
+    Tensor targetLengths,
     const int64_t blank) {
-  TORCH_CHECK(logProbs.is_cuda(), "log_probs must be a CUDA tensor");
-  TORCH_CHECK(targets.is_cuda(), "targets must be a CUDA tensor");
-  TORCH_CHECK(
-      logProbs.device() == targets.device(),
+
+  STD_TORCH_CHECK(logProbs.is_cuda(), "log_probs must be a CUDA tensor");
+  STD_TORCH_CHECK(targets.is_cuda(), "targets must be a CUDA tensor");
+  STD_TORCH_CHECK(
+      logProbs.get_device_index() == targets.get_device_index(),
       "log_probs and targets need to be on the same device");
-  TORCH_CHECK(
-      logProbs.dtype() == torch::kFloat64 ||
-          logProbs.dtype() == torch::kFloat32 ||
-          logProbs.dtype() == torch::kFloat16,
+  STD_TORCH_CHECK(inputLengths.is_cuda(), "input_lengths must be a CUDA tensor");
+  STD_TORCH_CHECK(targetLengths.is_cuda(), "target_lengths must be a CUDA tensor");
+  STD_TORCH_CHECK(
+      logProbs.scalar_type() == ScalarType::Double ||
+          logProbs.scalar_type() == ScalarType::Float ||
+          logProbs.scalar_type() == ScalarType::Half,
       "log_probs must be float64, float32 or float16 (half) type");
-  TORCH_CHECK(
-      targets.dtype() == torch::kInt32 || targets.dtype() == torch::kInt64,
+  STD_TORCH_CHECK(
+      targets.scalar_type() == ScalarType::Int || targets.scalar_type() == ScalarType::Long,
       "targets must be int32 or int64 type");
-  TORCH_CHECK(logProbs.is_contiguous(), "log_probs must be contiguous");
-  TORCH_CHECK(targets.is_contiguous(), "targets must be contiguous");
-  TORCH_CHECK(
+  STD_TORCH_CHECK(logProbs.is_contiguous(), "log_probs must be contiguous");
+  STD_TORCH_CHECK(targets.is_contiguous(), "targets must be contiguous");
+  STD_TORCH_CHECK(
       logProbs.dim() == 3,
       "log_probs must be 3-D (batch_size, input length, num classes)");
-  TORCH_CHECK(
+  STD_TORCH_CHECK(
       targets.dim() == 2, "targets must be 2-D (batch_size, target length,)");
-  TORCH_CHECK(
+  STD_TORCH_CHECK(
       inputLengths.dim() == 1, "input_lengths must be 1-D (batch_size,)");
-  TORCH_CHECK(
+  STD_TORCH_CHECK(
       targetLengths.dim() == 1, "target_lengths must be 1-D (batch_size,)");
-  TORCH_CHECK(
+  STD_TORCH_CHECK(
       logProbs.size(0) == 1,
       "The batch dimension for log_probs must be 1 at the current version.")
-  TORCH_CHECK(
+  STD_TORCH_CHECK(
       targets.size(0) == 1,
       "The batch dimension for targets must be 1 at the current version.")
-  TORCH_CHECK(
+  STD_TORCH_CHECK(
       blank >= 0 && blank < logProbs.size(-1),
       "blank must be within [0, num classes)");
 
-  TORCH_CHECK(
-      logProbs.size(1) == at::max(inputLengths).item().toInt(),
+  STD_TORCH_CHECK(logProbs.size(1) == torchaudio::util::max<int>(inputLengths),
       "input length mismatch");
-  TORCH_CHECK(
-      targets.size(1) == at::max(targetLengths).item().toInt(),
+  STD_TORCH_CHECK(
+      targets.size(1) == torchaudio::util::max<int>(targetLengths),
       "target length mismatch");
 
   auto B = logProbs.size(0);
   auto T = logProbs.size(1); // num frames
-  auto paths = torch::zeros(
-      {B, T},
-      torch::TensorOptions().device(torch::kCPU).dtype(targets.dtype()));
-  AT_DISPATCH_FLOATING_TYPES_AND_HALF(
-      logProbs.scalar_type(), "forced_align_impl", [&] {
-        if (targets.scalar_type() == torch::kInt64) {
-          forced_align_impl<scalar_t, torch::kInt64>(
-              logProbs, targets, blank, paths);
+
+  Tensor paths = torch::stable::empty({B, T}, targets.scalar_type());
+  torch::stable::zero_(paths);
+
+  THO_DISPATCH_V2(logProbs.scalar_type(), "forced_align_impl", AT_WRAP([&] {
+        if (targets.scalar_type() == ScalarType::Long) {
+          (forced_align_impl<scalar_t, int64_t>(logProbs, targets, blank, paths));
+        } else if (targets.scalar_type() == ScalarType::Int) {
+          (forced_align_impl<scalar_t, int32_t>(logProbs, targets, blank, paths));
         } else {
-          forced_align_impl<scalar_t, torch::kInt32>(
-              logProbs, targets, blank, paths);
+          STD_TORCH_CHECK(
+              false, "unexpected targets dtype:", targets.scalar_type());
         }
-      });
-  return std::make_tuple(
-      paths.to(logProbs.device()),
-      logProbs.index(
-          {torch::indexing::Slice(),
-           torch::linspace(
-               0, T - 1, T, torch::TensorOptions().dtype(paths.dtype())),
-           paths.index({0})}));
+      }), AT_EXPAND(AT_FLOATING_TYPES), ScalarType::Half);
+  Tensor pathsCuda = torch::stable::to(paths, logProbs.device());
+  return std::make_tuple(pathsCuda, logProbs);
 }
 
-TORCH_LIBRARY_IMPL(torchaudio, CUDA, m) {
-  m.impl("forced_align", &compute);
+STABLE_TORCH_LIBRARY_IMPL(torchaudio, CUDA, m) {
+  m.impl("forced_align", TORCH_BOX(&compute));
 }
 
 } // namespace gpu
