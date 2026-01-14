@@ -50,6 +50,7 @@ def run_train(args):
         checkpoint,
         train_checkpoint,
     ]
+    print(f"GPUs requested {args.gpus}, nodes {args.num_nodes}")
     trainer = Trainer(
         default_root_dir=args.exp_dir,
         max_steps=args.max_updates,
@@ -198,6 +199,7 @@ def _parse_args():
         help="Number of seconds of audio in a mini-batch. (Default: 87.5)",
     )
     parser.add_argument("--debug", action="store_true", help="whether to use debug level for logging")
+
     return parser.parse_args()
 
 

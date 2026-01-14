@@ -140,7 +140,11 @@ class HuBERTPreTrainModule(LightningModule):
 
         if model_name == "hubert_pretrain_base":
             self.model = torchaudio.models.hubert_pretrain_base(
-                feature_grad_mult=feature_grad_mult, num_classes=num_classes
+                feature_grad_mult=feature_grad_mult,
+                num_classes=num_classes,
+                mask_prob=0.4,  # Reduced from default 0.8 - less aggressive masking
+                mask_length=5,  # Reduced from default 10 - shorter mask spans
+                mask_channel_length=5,  # Reduced from default 10 - shorter channel masks
             )
         elif model_name == "hubert_pretrain_large":
             self.model = torchaudio.models.hubert_pretrain_large()

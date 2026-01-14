@@ -7,8 +7,9 @@ The script includes:
     - Pseudo-label generation
 """
 import logging
-import scipy.signal.windows as windows
 import scipy.signal
+import scipy.signal.windows as windows
+# Fix for scipy >= 1.2.0 where hann moved to windows module
 scipy.signal.hann = windows.hann
 
 from soundsig.signal import lowpass_filter, bandpass_filter, resample_signal
@@ -39,9 +40,9 @@ def _parse_args():
     parser.add_argument("--dataset", default="short_zebra_finch", type=str, choices=["librispeech", "librilight","short_zebra_finch"])
     parser.add_argument(
         "--root-dir",
-        default="/Users/jonathanwang/Desktop/vocalizations_lab/datasets/Zebra_Finch_Dataset/dataset",
+        default="/Users/jonathanwang/Desktop/vocalizations_lab/datasets/Zebra_Finch_Dataset",
         type=Path,
-        help="The path to the directory where the directory ``LibriSpeech`` or ``LibriLight`` is stored.",
+        help="The path to the directory where the Zebra Finch dataset is stored.",
     )
     parser.add_argument("--num-rank", default=5, type=int)
     #TODO: What are these arguments?
@@ -61,7 +62,7 @@ def _parse_args():
     parser.add_argument("--use-gpu", default=False, type=bool)
     parser.add_argument(
         "--exp-dir",
-        default="/Users/jonathanwang/Desktop/vocalizations_lab/HubertRes",
+        default="/Users/jonathanwang/Desktop/vocalizations_lab/pytorchAudio/examples/hubert/exp",
         type=Path,
         help="The directory to store the experiment outputs.",
     )
@@ -90,7 +91,11 @@ def _parse_args():
 def resample_and_save_audio(input_path: Path, output_path: Path, orig_freq: int, new_freq: int,
                             low_freq=100, high_freq=8000, filter_order=5, rescale=False, chunk_size=10):
     waveform, sr = torchaudio.load(input_path)
-    assert sr == orig_freq, "Sample rate mismatch"
+
+    # Handle sample rate flexibility - don't assert strict match
+    if sr != orig_freq:
+        print(f"Warning: File {input_path} has sample rate {sr}, expected {orig_freq}. Using actual rate.")
+        orig_freq = sr
 
     chunk_samples = orig_freq * chunk_size
     num_chunks = (waveform.size(1) + chunk_samples - 1) // chunk_samples  # Ceiling division
@@ -105,7 +110,10 @@ def resample_and_save_audio(input_path: Path, output_path: Path, orig_freq: int,
         start = i * chunk_samples
         end = min(start + chunk_samples, waveform.size(1))
         chunk = waveform[:, start:end]
-        resampled_chunk = bandpass_filter(chunk, sr, low_freq, high_freq, filter_order, rescale).squeeze(0)
+        # Apply bandpass filter with safe frequency range
+        nyquist = sr / 2
+        safe_high_freq = min(high_freq, nyquist - 100)  # Leave some margin
+        resampled_chunk = bandpass_filter(chunk, sr, low_freq, safe_high_freq, filter_order, rescale).squeeze(0)
         t_rs, filtered_chunk = resample_signal(resampled_chunk, sr, new_freq)
         resampled_waveform.append(torch.tensor(filtered_chunk))
 
@@ -173,8 +181,8 @@ def main(args):
         new_lines = preprocess_and_save_all(
             tsv_dir / f"{args.dataset}_{split}.tsv",
             preprocessed_audio_dir,
-            orig_freq=44100,
-            new_freq=16000
+            orig_freq=16000,  # Zebra finch files are already 16kHz
+            new_freq=16000   # No resampling needed
         )
 
         # Delete old TSV file

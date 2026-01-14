@@ -10,22 +10,17 @@ from typing import Optional, Tuple, Union
 import torch
 import torchaudio
 from torch import Tensor
-from torch import vmap
 from torchaudio.transforms import Spectrogram
 from torch.nn import Module
-import matplotlib.pyplot as plt
 import torch.nn.functional as F
-import os
-import numpy as np
-from soundsig.sound import spectrogram, plot_spectrogram
+# from soundsig.signal import spectrogram, plot_spectrogram
 
 from .common_utils import _get_feat_lens_paths
 
 _LG = logging.getLogger(__name__)
 _DEFAULT_DEVICE = torch.device("cpu")
-debug = True
+debug = False
 output_specs = 0
-
 
 def get_shard_range(num_lines: int, num_rank: int, rank: int) -> Tuple[int, int]:
     r"""Get the range of indices for the current rank in multi-processing.
@@ -51,7 +46,6 @@ def extract_feature_mfcc(
     path: str,
     device: torch.device,
     sample_rate: int,
-    segment_duration: int = 5,
 ) -> Tensor:
     r"""Extract MFCC features for KMeans clustering and pseudo label prediction.
     Args:
@@ -67,42 +61,36 @@ def extract_feature_mfcc(
     assert sr == sample_rate
     waveform = waveform.to(device)
 
-    segment_samples = sr * segment_duration
+    # Use 5-second segments for processing, or entire file if shorter
+    segment_length = 5  # seconds
+    segment_samples = sample_rate * segment_length
 
-    # Pad waveform if not a multiple of 5 seconds
-    num_total_samples = waveform.shape[1]
-    pad_len = (segment_samples - num_total_samples % segment_samples) % segment_samples
-    if pad_len > 0:
-        waveform = torch.nn.functional.pad(waveform, (0, pad_len))
-    
-    # Split into segments
-    segments = waveform.unfold(dimension=1, size=segment_samples, step=segment_samples)
-    # segments = segments.squeeze(0)
+    # Handle files shorter than segment_length
+    if waveform.shape[1] <= segment_samples:
+        # Pad the waveform to segment_samples length and process as one segment
+        padding_needed = segment_samples - waveform.shape[1]
+        padded_waveform = torch.nn.functional.pad(waveform, (0, padding_needed))
+        segments = padded_waveform.unsqueeze(1)  # Shape: (channels, 1, segment_samples)
+    else:
+        # Split into segments
+        segments = waveform.unfold(dimension=1, size=segment_samples, step=segment_samples)
+
+    # Create spectrogram transform with 5ms hop length (80 samples at 16kHz)
+    spectrogram_transform = Spectrogram(n_fft=400, hop_length=80, center=False).to(device)
 
     def f(segment):
-        segment = segment
-        t, freq, spec, rms = spectrogram(segment, 16000, 100, 40)
-        global debug
-        global output_specs
-        if debug and output_specs <= 2:
-            print("debugging", output_specs)
-            plot_spectrogram(t, freq, spec)
-            output_path = f"/global/scratch/users/jonathanswang/temp_files/mfcc/vocspectrogram{output_specs}.png"
-            os.makedirs(os.path.dirname(output_path), exist_ok=True)
-
-            torch.save(spec, f"/global/scratch/users/jonathanswang/temp_files/mfcc/vocspectrogram{output_specs}.pt")
-
-            plt.savefig(output_path)
-            plt.close()
-
-            output_specs += 1
-        return np.abs(spec)
+        # Apply spectrogram transform
+        spec = spectrogram_transform(segment.unsqueeze(0))  # Add batch dim
+        spec = spec.squeeze(0)  # Remove batch dim
+        spec = torch.log10(spec + 1e-8)  # Log scale with numerical stability
+        return spec.cpu().numpy()
 
     spectrograms = []
     for i in range(segments.shape[1]):
         segment = segments[:, i, :]  # (channel, segment_samples)
-        segment = segment.squeeze(-1)
-        segment = segment.squeeze(0)
+        # Handle case where segment might be 1D or 2D
+        if segment.dim() > 1:
+            segment = segment.squeeze(0)  # Remove channel dimension if present
         spec = f(segment)
         spectrograms.append(torch.from_numpy(spec))
 
@@ -110,13 +98,26 @@ def extract_feature_mfcc(
 
     # spectrograms = vmap(f)(segments)
 
-    frames_per_20ms = 2 # hop length is 10ms so 2 hop lengths = 20ms
-    features = torch.split(spectrograms, frames_per_20ms, dim=1)
+    frames_per_25ms = 5  # hop length is 5ms so 5 hop lengths = 25ms
+    frames_per_20ms = 4  # hop length is 5ms so 4 hop lengths = 20ms
+
+    # Updated: Use sliding windows for 25ms segments with 20ms step (matches CNN encoder)
+    window_size = frames_per_25ms  # 5 frames = 25ms window
+    step_size = frames_per_20ms    # 4 frame step = 20ms (matches CNN stride)
+    features = []
+
+    # spectrograms shape: (num_segments, freq_bins, time_frames)
+    # We want to window over time_frames (dimension 2), not freq_bins (dimension 1)
+    for i in range(0, spectrograms.shape[2] - window_size + 1, step_size):
+        window = spectrograms[:, :, i:i+window_size]  # (num_segments, freq_bins, window_size)
+        features.append(window)
 
     flattened = [t.reshape(t.shape[0], -1) for t in features]  # each becomes (N, M)
     target_len = flattened[0].shape[1]
     flattened = [F.pad(t, (0, target_len - t.shape[1])) if t.shape[1] < target_len else t for t in flattened]
     stacked = torch.cat(flattened, dim=0)  # final shape: (len(tensor_list) * 1136, M)
+
+    features = stacked
 
     # if spectrogram.size(1) == 1:
     #     spectrogram = spectrogram.expand(-1, 3, -1)
@@ -129,7 +130,17 @@ def extract_feature_mfcc(
     # feat = concat.transpose(0, 1)  # (time, freq)
     # import matplotlib.pyplot as plt
     #
-    return stacked
+    # spec = spectrogram.cpu().numpy()  # Convert to numpy for plotting
+    # plt.figure(figsize=(10, 6))
+    #
+    # # Plot the first channel (in case of multi-channel audio)
+    # plt.imshow(spectrogram[:, :, 0], aspect='auto', origin='lower')
+    # plt.colorbar(format='%+2.0f dB')
+    # plt.xlabel('Time (frames)')
+    # plt.ylabel('Frequency (bins)')
+    # plt.title('Spectrogram')
+    # plt.show()
+    return features
 
 
 def extract_feature_hubert(

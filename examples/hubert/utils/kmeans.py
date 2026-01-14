@@ -16,6 +16,7 @@ from .common_utils import _get_feat_lens_paths, _get_model_path
 _LG = logging.getLogger(__name__)
 
 
+# normalize vectors?
 def load_feature(
     feat_dir: Path,
     split: str,
