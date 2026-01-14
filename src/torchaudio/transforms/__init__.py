@@ -34,7 +34,6 @@ from ._transforms import (
     Vol,
 )
 
-
 __all__ = [
     "AddNoise",
     "AmplitudeToDB",

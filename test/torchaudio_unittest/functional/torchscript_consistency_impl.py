@@ -801,7 +801,7 @@ class FunctionalFloat32Only(TestBaseMixin):
             targets = torch.tensor([[1, 2]], device=tensor.device, dtype=torch.int32)
             logit_lengths = torch.tensor([2], device=tensor.device, dtype=torch.int32)
             target_lengths = torch.tensor([2], device=tensor.device, dtype=torch.int32)
-            return F.rnnt_loss(tensor, targets, logit_lengths, target_lengths)
+            return F.functional.rnnt_loss(tensor, targets, logit_lengths, target_lengths)
 
         logits = torch.tensor(
             [

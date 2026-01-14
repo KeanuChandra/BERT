@@ -1,7 +1,6 @@
 # -*- coding: utf-8 -*-
 
 import math
-import tempfile
 import warnings
 from collections.abc import Sequence
 from typing import List, Optional, Tuple, Union
@@ -9,7 +8,6 @@ from typing import List, Optional, Tuple, Union
 import torch
 import torchaudio
 from torch import Tensor
-from torchaudio._internal.module_utils import deprecated
 
 from .filtering import highpass_biquad, treble_biquad
 
@@ -33,7 +31,6 @@ __all__ = [
     "mask_along_axis_iid",
     "sliding_window_cmn",
     "spectral_centroid",
-    "apply_codec",
     "resample",
     "edit_distance",
     "loudness",
@@ -816,7 +813,7 @@ def _get_mask_param(mask_param: int, p: float, axis_length: int) -> int:
 def mask_along_axis_iid(
     specgrams: Tensor,
     mask_param: int,
-    mask_value: float,
+    mask_value: Union[float, Tensor],
     axis: int,
     p: float = 1.0,
 ) -> Tensor:
@@ -850,7 +847,8 @@ def mask_along_axis_iid(
 
     if axis not in [dim - 2, dim - 1]:
         raise ValueError(
-            f"Only Frequency and Time masking are supported (axis {dim-2} and axis {dim-1} supported; {axis} given)."
+            "Only Frequency and Time masking are supported"
+            f" (axis {dim - 2} and axis {dim - 1} supported; {axis} given)."
         )
 
     if not 0.0 <= p <= 1.0:
@@ -873,7 +871,12 @@ def mask_along_axis_iid(
 
     # Per batch example masking
     specgrams = specgrams.transpose(axis, -1)
-    specgrams = specgrams.masked_fill((mask >= mask_start) & (mask < mask_end), mask_value)
+    # this aims to avoid CPU-GPU sync from upstream
+    specgrams = (
+        torch.where((mask >= mask_start) & (mask < mask_end), mask_value.repeat(specgrams.shape), specgrams)
+        if isinstance(mask_value, Tensor)
+        else specgrams.masked_fill((mask >= mask_start) & (mask < mask_end), mask_value)
+    )
     specgrams = specgrams.transpose(axis, -1)
 
     return specgrams
@@ -917,7 +920,8 @@ def mask_along_axis(
 
     if axis not in [dim - 2, dim - 1]:
         raise ValueError(
-            f"Only Frequency and Time masking are supported (axis {dim-2} and axis {dim-1} supported; {axis} given)."
+            "Only Frequency and Time masking are supported"
+            f" (axis {dim - 2} and axis {dim - 1} supported; {axis} given)."
         )
 
     if not 0.0 <= p <= 1.0:
@@ -1293,51 +1297,6 @@ def spectral_centroid(
     freqs = torch.linspace(0, sample_rate // 2, steps=1 + n_fft // 2, device=specgram.device).reshape((-1, 1))
     freq_dim = -2
     return (freqs * specgram).sum(dim=freq_dim) / specgram.sum(dim=freq_dim)
-
-
-@deprecated("Please migrate to :py:class:`torchaudio.io.AudioEffector`.", remove=False)
-def apply_codec(
-    waveform: Tensor,
-    sample_rate: int,
-    format: str,
-    channels_first: bool = True,
-    compression: Optional[float] = None,
-    encoding: Optional[str] = None,
-    bits_per_sample: Optional[int] = None,
-) -> Tensor:
-    r"""
-    Apply codecs as a form of augmentation.
-
-    .. devices:: CPU
-
-    Args:
-        waveform (Tensor): Audio data. Must be 2 dimensional. See also ```channels_first```.
-        sample_rate (int): Sample rate of the audio waveform.
-        format (str): File format.
-        channels_first (bool, optional):
-            When True, both the input and output Tensor have dimension `(channel, time)`.
-            Otherwise, they have dimension `(time, channel)`.
-        compression (float or None, optional): Used for formats other than WAV.
-            For more details see :py:func:`torchaudio.backend.sox_io_backend.save`.
-        encoding (str or None, optional): Changes the encoding for the supported formats.
-            For more details see :py:func:`torchaudio.backend.sox_io_backend.save`.
-        bits_per_sample (int or None, optional): Changes the bit depth for the supported formats.
-            For more details see :py:func:`torchaudio.backend.sox_io_backend.save`.
-
-    Returns:
-        Tensor: Resulting Tensor.
-        If ``channels_first=True``, it has `(channel, time)` else `(time, channel)`.
-    """
-    from torchaudio.backend import _sox_io_backend
-
-    with tempfile.NamedTemporaryFile() as f:
-        torchaudio.backend._sox_io_backend.save(
-            f.name, waveform, sample_rate, channels_first, compression, format, encoding, bits_per_sample
-        )
-        augmented, sr = _sox_io_backend.load(f.name, channels_first=channels_first, format=format)
-    if sr != sample_rate:
-        augmented = resample(augmented, sr, sample_rate)
-    return augmented
 
 
 _CPU = torch.device("cpu")
@@ -1760,6 +1719,31 @@ def _fix_waveform_shape(
     return waveform_shift
 
 
+class RnntLoss(torch.autograd.Function):
+    @staticmethod
+    def forward(ctx, *args):
+        output, saved = torch.ops.torchaudio.rnnt_loss_forward(*args)
+        ctx.save_for_backward(saved)
+        return output
+
+    @staticmethod
+    def backward(ctx, dy):
+        grad = ctx.saved_tensors[0]
+        grad_out = dy.view((-1, 1, 1, 1))
+        result = grad * grad_out
+        return (result, None, None, None, None, None, None, None)
+
+    @staticmethod
+    def ts_apply(logits, targets, logit_lengths, target_lengths, blank: int, clamp: float, fused_log_softmax: bool):
+        if torch.jit.is_scripting():
+            output, saved = torch.ops.torchaudio.rnnt_loss_forward(
+                logits, targets, logit_lengths, target_lengths, blank, clamp, fused_log_softmax
+            )
+            return output
+        else:
+            return RnntLoss.apply(logits, targets, logit_lengths, target_lengths, blank, clamp, fused_log_softmax)
+
+
 def rnnt_loss(
     logits: Tensor,
     targets: Tensor,
@@ -1802,15 +1786,7 @@ def rnnt_loss(
     if blank < 0:  # reinterpret blank index if blank < 0.
         blank = logits.shape[-1] + blank
 
-    costs, _ = torch.ops.torchaudio.rnnt_loss(
-        logits=logits,
-        targets=targets,
-        logit_lengths=logit_lengths,
-        target_lengths=target_lengths,
-        blank=blank,
-        clamp=clamp,
-        fused_log_softmax=fused_log_softmax,
-    )
+    costs = RnntLoss.ts_apply(logits, targets, logit_lengths, target_lengths, blank, clamp, fused_log_softmax)
 
     if reduction == "mean":
         return costs.mean()
@@ -2494,7 +2470,7 @@ def deemphasis(waveform, coeff: float = 0.97) -> torch.Tensor:
     """
     a_coeffs = torch.tensor([1.0, -coeff], dtype=waveform.dtype, device=waveform.device)
     b_coeffs = torch.tensor([1.0, 0.0], dtype=waveform.dtype, device=waveform.device)
-    return torchaudio.functional.lfilter(waveform, a_coeffs=a_coeffs, b_coeffs=b_coeffs)
+    return torchaudio.functional.filtering.lfilter(waveform, a_coeffs=a_coeffs, b_coeffs=b_coeffs)
 
 
 def frechet_distance(mu_x, sigma_x, mu_y, sigma_y):

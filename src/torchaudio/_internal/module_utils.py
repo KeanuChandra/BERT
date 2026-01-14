@@ -1,8 +1,6 @@
 import importlib.util
 import os
-import warnings
 from functools import wraps
-from typing import Optional
 
 
 def eval_env(var, default):
@@ -56,41 +54,6 @@ def requires_module(*modules: str):
                 raise RuntimeError(f"{func.__module__}.{func.__name__} requires {req}")
 
             return wrapped
-
-    return decorator
-
-
-def deprecated(direction: str, version: Optional[str] = None, remove: bool = False):
-    """Decorator to add deprecation message
-
-    Args:
-        direction (str): Migration steps to be given to users.
-        version (str or int): The version when the object will be removed
-        remove (bool): If enabled, append future removal message.
-    """
-
-    def decorator(func):
-        @wraps(func)
-        def wrapped(*args, **kwargs):
-            message = f"{func.__module__}.{func.__name__} has been deprecated. {direction}"
-            if remove:
-                message += f' It will be removed from {"future" if version is None else version} release. '
-            warnings.warn(message, stacklevel=2)
-            return func(*args, **kwargs)
-
-        message = "This function has been deprecated. "
-        if remove:
-            message += f'It will be removed from {"future" if version is None else version} release. '
-
-        wrapped.__doc__ = f"""DEPRECATED: {func.__doc__}
-
-    .. warning::
-
-       {message}
-       {direction}
-        """
-
-        return wrapped
 
     return decorator
 
