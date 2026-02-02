@@ -127,3 +127,12 @@ examples/interactive_asr/data/*.txt
 examples/interactive_asr/data/*.model
 examples/interactive_asr/data/*.pt
 examples/tutorials/_assets
+
+# HuBERT experiment files
+examples/hubert/exp/
+examples/hubert/temp_files/
+examples/hubert/tmp/
+examples/hubert/.ipynb_checkpoints/
+examples/hubert/test_*.py
+examples/hubert/verify_*.py
+examples/hubert/Untitled*.ipynb

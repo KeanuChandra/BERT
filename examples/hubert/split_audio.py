@@ -74,7 +74,7 @@ def _parse_args():
     )
     parser.add_argument(
         "--dataset",
-        choices=["short_zebra_finch", "mfcc"],
+        choices=["ZF_test_pipeline", "mfcc"],
         type=str,
         required=True,
         help="dataset to use.",

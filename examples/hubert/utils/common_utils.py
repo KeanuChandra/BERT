@@ -50,7 +50,7 @@ def create_tsv(
 
     valid_f = open(out_dir / f"{dataset}_valid.tsv", "w") if valid_percent > 0 else None
     # Updated pattern to match Zebra Finch dataset files
-    if dataset == "short_zebra_finch":
+    if dataset == "ZF_test_pipeline":
         search_pattern = ".*zebra_finch.*train.*"
     else:
         search_pattern = ".*train.*"
