@@ -38,8 +38,8 @@ def load_feature(
     lens = []
     for rank in range(1, num_rank + 1):
         feat_path, len_path = _get_feat_lens_paths(feat_dir, split, rank, num_rank)
-        feat = torch.load(feat_path, weights_only=True)
-        length = torch.load(len_path, weights_only=True).int()
+        feat = torch.load(feat_path)
+        length = torch.load(len_path).int()
         if percent < 0:
             feats.append(feat)
             lens.append(length)
@@ -139,7 +139,7 @@ def learn_kmeans(
 
 class ApplyKmeans:
     def __init__(self, km_path, device):
-        km_data = torch.load(km_path, weights_only=True)
+        km_data = torch.load(km_path)
         cluster_centers = km_data['cluster_centers']
 
         self.C = cluster_centers.T.to(device)
@@ -183,8 +183,8 @@ def get_km_label(
     for rank in range(1, num_rank + 1):
         offset = 0
         feat_path, len_path = _get_feat_lens_paths(feat_dir, split, rank, num_rank)
-        feats = torch.load(feat_path, weights_only=True)
-        length = torch.load(len_path, weights_only=True).int()
+        feats = torch.load(feat_path)
+        length = torch.load(len_path).int()
         assert feats.shape[0] == length.sum()
         labels = apply_kmeans(feats.to(device))
         for i in range(length.shape[0]):
