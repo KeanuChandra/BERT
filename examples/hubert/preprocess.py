@@ -126,10 +126,7 @@ def resample_and_save_audio(input_path: Path, output_path: Path, orig_freq: int,
         start = i * chunk_samples
         end = min(start + chunk_samples, waveform.size(1))
         chunk = waveform[:, start:end]
-        # Apply bandpass filter with safe frequency range
-        nyquist = sr / 2
-        safe_high_freq = min(high_freq, nyquist - 100)  # Leave some margin
-        resampled_chunk = bandpass_filter(chunk, sr, low_freq, safe_high_freq, filter_order, rescale).squeeze(0)
+        resampled_chunk = bandpass_filter(chunk, sr, low_freq, high_freq, filter_order, rescale).squeeze(0)
         t_rs, filtered_chunk = resample_signal(resampled_chunk, sr, new_freq)
         # Ensure tensor is float32 for torchaudio.save compatibility
         resampled_waveform.append(torch.tensor(filtered_chunk, dtype=torch.float32))
@@ -201,8 +198,8 @@ def main(args):
         new_lines = preprocess_and_save_all(
             tsv_dir / f"{args.dataset}_{split}.tsv",
             preprocessed_audio_dir,
-            orig_freq=16000,  # Zebra finch files are already 16kHz
-            new_freq=16000   # No resampling needed
+            orig_freq=44100,
+            new_freq=16000
         )
 
         # Delete old TSV file

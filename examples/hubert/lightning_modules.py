@@ -19,6 +19,7 @@ from torch.utils.data import DataLoader
 
 
 Batch = Tuple[Tensor, Tensor, Tensor]
+Batch_FineTune = Tuple[Tensor, Tensor, Tensor, Tensor]
 
 
 class LinearDecayLRScheduler(torch.optim.lr_scheduler._LRScheduler):
@@ -44,6 +45,56 @@ class LinearDecayLRScheduler(torch.optim.lr_scheduler._LRScheduler):
         else:
             pct_remaining = (self.max_updates - self._step_count) / (self.max_updates - self.warmup_updates)
             return [base_lr * pct_remaining for base_lr in self.base_lrs]
+
+
+class TriStageLRScheduler(torch.optim.lr_scheduler._LRScheduler):
+    """Linear learning rate scheduler with warmup, hold, and decay.
+
+    Three stages:
+    1. Warmup: Linear increase from init_lr_scale * base_lr to base_lr
+    2. Hold: Constant at base_lr
+    3. Decay: Exponential decay from base_lr to final_lr_scale * base_lr
+    """
+
+    def __init__(
+        self,
+        optimizer: Optimizer,
+        warmup_updates: int,
+        hold_updates: int,
+        decay_updates: int,
+        init_lr_scale: float = 0.01,
+        final_lr_scale: float = 0.05,
+        last_epoch: int = -1,
+        verbose: bool = False,
+    ):
+        self.warmup_updates = warmup_updates
+        self.hold_updates = hold_updates
+        self.decay_updates = decay_updates
+        self.init_lr_scale = init_lr_scale
+        self.final_lr_scale = final_lr_scale
+
+        super().__init__(optimizer, last_epoch=last_epoch, verbose=verbose)
+
+    def get_lr(self):
+        if self._step_count <= self.warmup_updates:
+            return [
+                base_lr * (self.init_lr_scale + self._step_count / self.warmup_updates * (1 - self.init_lr_scale))
+                for base_lr in self.base_lrs
+            ]
+        elif self.warmup_updates < self._step_count <= (self.warmup_updates + self.hold_updates):
+            return list(self.base_lrs)
+        elif self._step_count <= (self.warmup_updates + self.hold_updates + self.decay_updates):
+            return [
+                base_lr
+                * math.exp(
+                    math.log(self.final_lr_scale)
+                    * (self._step_count - self.warmup_updates - self.hold_updates)
+                    / self.decay_updates
+                )
+                for base_lr in self.base_lrs
+            ]
+        else:
+            return [base_lr * self.final_lr_scale for base_lr in self.base_lrs]
 
 
 
@@ -301,3 +352,199 @@ class HuBERTPreTrainModule(LightningModule):
         #)
         #return None
         # return dataloader # disable validation for pretraining
+
+
+class HuBERTFineTuneModule(LightningModule):
+    """Fine-tuning module for HuBERT.
+
+    This module is used to fine-tune a pre-trained HuBERT model on downstream tasks
+    using CTC loss. Requires labeled data with transcriptions.
+
+    Note: The train_dataloader and val_dataloader methods need to be implemented
+    for your specific dataset. The original implementation used LibriSpeech.
+    """
+
+    def __init__(
+        self,
+        *,
+        model_name: str,
+        encoder_projection_dropout: float,
+        encoder_attention_dropout: float,
+        encoder_ff_interm_dropout: float,
+        encoder_dropout: float,
+        encoder_layer_drop: float,
+        mask_prob: float,
+        mask_channel_prob: float,
+        mask_channel_length: float,
+        num_classes: int,
+        aux_num_out: int,
+        checkpoint: str,
+        dataset_path: str,
+        seconds_per_batch: float,
+        learning_rate: float,
+        betas: Tuple[float, float],
+        adam_eps: float,
+        weight_decay: float,
+        freeze_encoder_updates: int,
+        warmup_updates: int,
+        hold_updates: int,
+        decay_updates: int,
+    ):
+        super().__init__()
+
+        if model_name == "hubert_pretrain_base":
+            self.model = torchaudio.models.hubert_pretrain_base(
+                encoder_projection_dropout=encoder_projection_dropout,
+                encoder_attention_dropout=encoder_attention_dropout,
+                encoder_ff_interm_dropout=encoder_ff_interm_dropout,
+                encoder_dropout=encoder_dropout,
+                encoder_layer_drop=encoder_layer_drop,
+                mask_prob=mask_prob,
+                mask_channel_prob=mask_channel_prob,
+                mask_channel_length=mask_channel_length,
+                num_classes=num_classes,
+            )
+            self.aux = torch.nn.Linear(768, aux_num_out)
+        elif model_name == "hubert_pretrain_large":
+            self.model = torchaudio.models.hubert_pretrain_large(
+                encoder_projection_dropout=encoder_projection_dropout,
+                encoder_attention_dropout=encoder_attention_dropout,
+                encoder_ff_interm_dropout=encoder_ff_interm_dropout,
+                encoder_dropout=encoder_dropout,
+                encoder_layer_drop=encoder_layer_drop,
+                mask_prob=mask_prob,
+                mask_channel_prob=mask_channel_prob,
+                mask_channel_length=mask_channel_length,
+                num_classes=num_classes,
+            )
+            self.aux = torch.nn.Linear(1024, aux_num_out)
+        elif model_name == "hubert_pretrain_xlarge":
+            self.model = torchaudio.models.hubert_pretrain_xlarge(
+                encoder_projection_dropout=encoder_projection_dropout,
+                encoder_attention_dropout=encoder_attention_dropout,
+                encoder_ff_interm_dropout=encoder_ff_interm_dropout,
+                encoder_dropout=encoder_dropout,
+                encoder_layer_drop=encoder_layer_drop,
+                mask_prob=mask_prob,
+                mask_channel_prob=mask_channel_prob,
+                mask_channel_length=mask_channel_length,
+                num_classes=num_classes,
+            )
+            self.aux = torch.nn.Linear(1280, aux_num_out)
+        else:
+            raise ValueError(f"Unsupported model name: {model_name}.")
+
+        self._load_checkpoint(checkpoint)
+        for p in self.model.wav2vec2.feature_extractor.parameters():
+            p.requires_grad = False
+
+        self.loss_fn = torch.nn.CTCLoss(blank=0, reduction="sum", zero_infinity=True)
+        self.optimizer = torch.optim.AdamW(
+            list(self.aux.parameters()) + list(self.model.parameters()),
+            lr=learning_rate,
+            betas=betas,
+            eps=adam_eps,
+            weight_decay=weight_decay,
+        )
+        self.freeze_encoder_updates = freeze_encoder_updates
+        self.lr_scheduler = TriStageLRScheduler(self.optimizer, warmup_updates, hold_updates, decay_updates)
+        self.dataset_path = dataset_path
+        self.seconds_per_batch = seconds_per_batch
+        self.automatic_optimization = False
+        self.scaler = torch.cuda.amp.GradScaler()
+
+    def _load_checkpoint(self, checkpoint):
+        """Load pretrained model from checkpoint."""
+        state_dict = torch.load(checkpoint, map_location=torch.device("cpu"))
+        state_dict = state_dict["state_dict"]
+        s = {}
+        for k in state_dict:
+            if "model." in k:
+                s[k.replace("model.", "")] = state_dict[k]
+        self.model.load_state_dict(s)
+
+    def _step(self, batch: Batch_FineTune, batch_idx, step_type):
+        if batch is None:
+            return None
+        waveforms, labels, audio_lengths, label_lengths = batch
+        if self.global_step <= self.freeze_encoder_updates:
+            with torch.no_grad():
+                x, out_len = self.model.wav2vec2.feature_extractor(waveforms, audio_lengths)
+                padding_mask = components._get_padding_mask(x, out_len)
+                x, attention_mask = self.model.wav2vec2.encoder._preprocess(x, out_len)
+                x, _ = self.model.mask_generator(x, padding_mask)
+                x = self.model.wav2vec2.encoder.transformer(x, attention_mask=attention_mask)
+        else:
+            with torch.no_grad():
+                x, out_len = self.model.wav2vec2.feature_extractor(waveforms, audio_lengths)
+                padding_mask = components._get_padding_mask(x, out_len)
+            x, attention_mask = self.model.wav2vec2.encoder._preprocess(x, out_len)
+            x, _ = self.model.mask_generator(x, padding_mask)
+            x = self.model.wav2vec2.encoder.transformer(x, attention_mask=attention_mask)
+        logits = self.aux(x)
+        log_probs = F.log_softmax(logits, dim=-1)
+        log_probs = log_probs.transpose(0, 1)
+        loss = self.loss_fn(
+            log_probs,
+            labels,
+            out_len,
+            label_lengths,
+        )
+        self.log(f"{step_type}_loss", loss.item() / waveforms.size(0), on_step=True, on_epoch=True)
+        return loss
+
+    def configure_optimizers(self):
+        return (
+            [self.optimizer],
+            [{"scheduler": self.lr_scheduler, "interval": "step"}],
+        )
+
+    def training_step(self, batch: Batch_FineTune, batch_idx):
+        """Custom training step with loss normalization and automatic mixed precision training."""
+        opt = self.optimizers()
+        opt.zero_grad()
+        with torch.cuda.amp.autocast(enabled=True):
+            loss = self._step(batch, batch_idx, "train")
+
+        # normalize the loss based on the sum of batch_size across all GPUs
+        batch_size = batch[0].size(0)
+        batch_sizes = self.all_gather(batch_size)
+        self.log("Gathered batch size", batch_sizes.sum(), on_step=True, on_epoch=True)
+        loss *= batch_sizes.size(0) / batch_sizes.sum()  # world size / batch size
+
+        # backward the loss and clip the gradients
+        loss = self.scaler.scale(loss)
+        self.manual_backward(loss)
+        self.scaler.unscale_(opt)
+        torch.nn.utils.clip_grad_norm_(self.model.parameters(), 5.0)
+
+        # optimization
+        self.scaler.step(opt)
+        sch = self.lr_schedulers()
+        sch.step()
+        self.scaler.update()
+
+    def validation_step(self, batch: Batch_FineTune, batch_idx):
+        return self._step(batch, batch_idx, "val")
+
+    def train_dataloader(self):
+        """Implement this method for your specific dataset.
+
+        Should return a DataLoader that yields batches of:
+        (waveforms, labels, audio_lengths, label_lengths)
+        """
+        raise NotImplementedError(
+            "train_dataloader must be implemented for your specific dataset. "
+            "The batch should contain (waveforms, labels, audio_lengths, label_lengths)."
+        )
+
+    def val_dataloader(self):
+        """Implement this method for your specific dataset.
+
+        Should return a DataLoader that yields batches of:
+        (waveforms, labels, audio_lengths, label_lengths)
+        """
+        raise NotImplementedError(
+            "val_dataloader must be implemented for your specific dataset. "
+            "The batch should contain (waveforms, labels, audio_lengths, label_lengths)."
+        )
