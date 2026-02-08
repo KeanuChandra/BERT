@@ -49,7 +49,11 @@ def create_tsv(
         out_dir.mkdir()
 
     valid_f = open(out_dir / f"{dataset}_valid.tsv", "w") if valid_percent > 0 else None
-    search_pattern = ".*train.*"
+    # Updated pattern to match Zebra Finch dataset files
+    if dataset == "ZF_test_pipeline":
+        search_pattern = ".*zebra_finch.*train.*"
+    else:
+        search_pattern = ".*train.*"
     with open(out_dir / f"{dataset}_train.tsv", "w") as train_f:
         print(root_dir, file=train_f)
 

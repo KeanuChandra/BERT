@@ -50,6 +50,7 @@ def run_train(args):
         checkpoint,
         train_checkpoint,
     ]
+    print(f"GPUs requested {args.gpus}, nodes {args.num_nodes}")
     trainer = Trainer(
         default_root_dir=args.exp_dir,
         max_steps=args.max_updates,
@@ -77,6 +78,9 @@ def run_train(args):
         clip_norm=args.clip_norm,
         warmup_updates=args.warmup_updates,
         max_updates=args.max_updates,
+        kernel_size_ms=args.kernel_size_ms,
+        stride_ms=args.stride_ms,
+        sample_rate=args.sample_rate,
     )
     trainer.fit(model, ckpt_path=args.resume_checkpoint)
 
@@ -100,7 +104,7 @@ def _parse_args():
     )
     parser.add_argument(
         "--feature-type",
-        choices=["mfcc", "hubert"],
+        choices=["spectrogram", "hubert"],
         type=str,
         required=True,
     )
@@ -133,7 +137,7 @@ def _parse_args():
     parser.add_argument(
         "--dataset",
         default="librispeech",
-        choices=["short_zebra_finch", "librilight"],
+        choices=["ZF_test_pipeline", "librilight"],
         type=str,
         help="The dataset for training. (Default: 'librispeech')",
     )
@@ -197,7 +201,26 @@ def _parse_args():
         type=float,
         help="Number of seconds of audio in a mini-batch. (Default: 87.5)",
     )
+    parser.add_argument(
+        "--kernel-size-ms",
+        default=25,
+        type=int,
+        help="HuBERT receptive field in milliseconds (Default: 25)",
+    )
+    parser.add_argument(
+        "--stride-ms",
+        default=20,
+        type=int,
+        help="HuBERT frame stride in milliseconds (Default: 20)",
+    )
+    parser.add_argument(
+        "--sample-rate",
+        default=16000,
+        type=int,
+        help="Audio sample rate in Hz (Default: 16000)",
+    )
     parser.add_argument("--debug", action="store_true", help="whether to use debug level for logging")
+
     return parser.parse_args()
 
 

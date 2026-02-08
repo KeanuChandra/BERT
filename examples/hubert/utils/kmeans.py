@@ -15,6 +15,7 @@ from .common_utils import _get_feat_lens_paths, _get_model_path
 _LG = logging.getLogger(__name__)
 
 
+# normalize vectors?
 def load_feature(
     feat_dir: Path,
     split: str,
@@ -37,8 +38,8 @@ def load_feature(
     lens = []
     for rank in range(1, num_rank + 1):
         feat_path, len_path = _get_feat_lens_paths(feat_dir, split, rank, num_rank)
-        feat = torch.load(feat_path, weights_only=True)
-        length = torch.load(len_path, weights_only=True).int()
+        feat = torch.load(feat_path)
+        length = torch.load(len_path).int()
         if percent < 0:
             feats.append(feat)
             lens.append(length)
@@ -126,9 +127,10 @@ def learn_kmeans(
     feats = feats.numpy()
     km_model.fit(feats)
     km_path = _get_model_path(km_dir)
-    import joblib
 
-    joblib.dump(km_model, km_path)
+    # Save cluster centers as torch tensor
+    cluster_centers = torch.from_numpy(km_model.cluster_centers_)
+    torch.save({'cluster_centers': cluster_centers, 'n_clusters': n_clusters}, km_path)
 
     inertia = -km_model.score(feats) / len(feats)
     _LG.info("Total intertia: %.5f", inertia)
@@ -137,18 +139,15 @@ def learn_kmeans(
 
 class ApplyKmeans:
     def __init__(self, km_path, device):
-        import joblib
+        km_data = torch.load(km_path)
+        cluster_centers = km_data['cluster_centers']
 
-        self.km_model = joblib.load(km_path)
-        self.C_np = self.km_model.cluster_centers_.transpose()
-        self.Cnorm_np = (self.C_np**2).sum(0, keepdims=True)
-
-        self.C = torch.from_numpy(self.C_np).to(device)
-        self.Cnorm = torch.from_numpy(self.Cnorm_np).to(device)
+        self.C = cluster_centers.T.to(device)
+        self.Cnorm = (self.C**2).sum(0, keepdim=True)
 
     def __call__(self, x):
         dist = x.pow(2).sum(1, keepdim=True) - 2 * torch.matmul(x, self.C) + self.Cnorm
-        return dist.argmin(dim=1).cpu().numpy()
+        return dist.argmin(dim=1).cpu()
 
 
 def get_km_label(
@@ -177,16 +176,22 @@ def get_km_label(
     km_path = _get_model_path(km_dir)
     label_path = label_dir / f"label_{split}.pt"
     apply_kmeans = ApplyKmeans(km_path, device)
-    with open(label_path, "w") as f:
-        for rank in range(1, num_rank + 1):
-            offset = 0
-            feat_path, len_path = _get_feat_lens_paths(feat_dir, split, rank, num_rank)
-            feats = torch.load(feat_path)
-            length = torch.load(len_path).int()
-            assert feats.shape[0] == length.sum()
-            labels = apply_kmeans(feats.to(device)).tolist()
-            for i in range(length.shape[0]):
-                label = labels[offset : offset + length[i]]
-                offset += length[i]
-                f.write(" ".join(map(str, label)) + "\n")
+
+    all_labels = []
+    all_lengths = []
+
+    for rank in range(1, num_rank + 1):
+        offset = 0
+        feat_path, len_path = _get_feat_lens_paths(feat_dir, split, rank, num_rank)
+        feats = torch.load(feat_path)
+        length = torch.load(len_path).int()
+        assert feats.shape[0] == length.sum()
+        labels = apply_kmeans(feats.to(device))
+        for i in range(length.shape[0]):
+            label = labels[offset : offset + length[i]]
+            offset += length[i]
+            all_labels.append(label)
+            all_lengths.append(length[i])
+
+    torch.save({'labels': all_labels, 'lengths': torch.stack(all_lengths)}, label_path)
     _LG.info("Finished predicting labels successfully")

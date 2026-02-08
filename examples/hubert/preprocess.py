@@ -7,8 +7,9 @@ The script includes:
     - Pseudo-label generation
 """
 import logging
-import scipy.signal.windows as windows
 import scipy.signal
+import scipy.signal.windows as windows
+# Fix for scipy >= 1.2.0 where hann moved to windows module
 scipy.signal.hann = windows.hann
 
 from soundsig.signal import lowpass_filter, bandpass_filter, resample_signal
@@ -36,16 +37,15 @@ def _parse_args():
         formatter_class=RawTextHelpFormatter,
     )
     parser.add_argument("--debug", action="store_true", help="Enable debug log")
-    parser.add_argument("--dataset", default="short_zebra_finch", type=str, choices=["librispeech", "librilight","short_zebra_finch"])
+    parser.add_argument("--dataset", default="ZF_test_pipeline", type=str, choices=["librispeech", "librilight","ZF_test_pipeline"])
     parser.add_argument(
         "--root-dir",
-        default="/Users/jonathanwang/Desktop/vocalizations_lab/datasets/Zebra_Finch_Dataset/dataset",
+        default="/Users/jonathanwang/Desktop/vocalizations_lab/datasets/Zebra_Finch_Dataset",
         type=Path,
-        help="The path to the directory where the directory ``LibriSpeech`` or ``LibriLight`` is stored.",
+        help="The path to the directory where the Zebra Finch dataset is stored.",
     )
-    parser.add_argument("--num-rank", default=5, type=int)
-    #TODO: What are these arguments?
-    parser.add_argument("--feat-type", default="mfcc", choices=["mfcc", "hubert"], type=str)
+    parser.add_argument("--num-rank", default=5, type=int, help="Number of parallel processes for feature extraction")
+    parser.add_argument("--feat-type", default="spectrogram", choices=["spectrogram", "hubert"], type=str, help="Feature type for KMeans clustering")
     parser.add_argument(
         "--layer-index",
         default=6,
@@ -58,10 +58,10 @@ def _parse_args():
         type=Path,
         help="The model checkpoint of hubert_pretrain_base model.",
     )
-    parser.add_argument("--use-gpu", default=False, type=bool)
+    parser.add_argument("--use-gpu", action="store_true", help="Use GPU for processing")
     parser.add_argument(
         "--exp-dir",
-        default="/Users/jonathanwang/Desktop/vocalizations_lab/HubertRes",
+        default="/Users/jonathanwang/Desktop/vocalizations_lab/pytorchAudio/examples/hubert/exp",
         type=Path,
         help="The directory to store the experiment outputs.",
     )
@@ -79,9 +79,26 @@ def _parse_args():
     )
     parser.add_argument(
         "--valid",
-        default=False,
-        type=bool,
-        help="Whether to create a validation set. (Default: False)",
+        action="store_true",
+        help="Whether to create a validation set.",
+    )
+    parser.add_argument(
+        "--kernel-size-ms",
+        default=25,
+        type=int,
+        help="HuBERT receptive field in milliseconds (Default: 25)",
+    )
+    parser.add_argument(
+        "--stride-ms",
+        default=20,
+        type=int,
+        help="HuBERT frame stride in milliseconds (Default: 20)",
+    )
+    parser.add_argument(
+        "--sample-rate",
+        default=16000,
+        type=int,
+        help="Audio sample rate in Hz (Default: 16000)",
     )
     args = parser.parse_args()
     return args
@@ -90,7 +107,11 @@ def _parse_args():
 def resample_and_save_audio(input_path: Path, output_path: Path, orig_freq: int, new_freq: int,
                             low_freq=100, high_freq=8000, filter_order=5, rescale=False, chunk_size=10):
     waveform, sr = torchaudio.load(input_path)
-    assert sr == orig_freq, "Sample rate mismatch"
+
+    # Handle sample rate flexibility - don't assert strict match
+    if sr != orig_freq:
+        print(f"Warning: File {input_path} has sample rate {sr}, expected {orig_freq}. Using actual rate.")
+        orig_freq = sr
 
     chunk_samples = orig_freq * chunk_size
     num_chunks = (waveform.size(1) + chunk_samples - 1) // chunk_samples  # Ceiling division
@@ -107,10 +128,14 @@ def resample_and_save_audio(input_path: Path, output_path: Path, orig_freq: int,
         chunk = waveform[:, start:end]
         resampled_chunk = bandpass_filter(chunk, sr, low_freq, high_freq, filter_order, rescale).squeeze(0)
         t_rs, filtered_chunk = resample_signal(resampled_chunk, sr, new_freq)
-        resampled_waveform.append(torch.tensor(filtered_chunk))
+        # Ensure tensor is float32 for torchaudio.save compatibility
+        resampled_waveform.append(torch.tensor(filtered_chunk, dtype=torch.float32))
 
     # Concatenate all chunks along the time dimension
     resampled_waveform = torch.cat(resampled_waveform).unsqueeze(0)
+
+    # Ensure final tensor is float32
+    resampled_waveform = resampled_waveform.float()
 
     # Save the resampled and filtered waveform
     torchaudio.save(output_path, resampled_waveform, new_freq)
@@ -144,8 +169,8 @@ def main(args):
 
     if not args.exp_dir.exists():
         args.exp_dir.mkdir()
-    if args.feat_type == "mfcc":
-        data_dir = args.exp_dir / "data" / "mfcc"
+    if args.feat_type == "spectrogram":
+        data_dir = args.exp_dir / "data" / "spectrogram"
     else:
         data_dir = args.exp_dir / "data" / f"{args.feat_type}_{args.layer_index}"
     data_dir.mkdir(parents=True, exist_ok=True)
@@ -202,7 +227,10 @@ def main(args):
             args.feat_type,
             args.layer_index,
             args.checkpoint_path,
-            16_000,
+            args.sample_rate,
+            args.kernel_size_ms,
+            args.stride_ms,
+            args.debug,
         ) for rank in range(1, args.num_rank + 1))
 
     # Fit KMeans clustering model
