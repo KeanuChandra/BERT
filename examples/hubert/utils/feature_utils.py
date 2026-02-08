@@ -20,7 +20,7 @@ _DEFAULT_DEVICE = torch.device("cpu")
 output_specs = 0
 
 
-def _save_first_chunk_spectrogram(chunk, log_spec, audio_path, freq, start_idx, sample_rate):
+def _save_first_chunk_spectrogram(chunk, log_spec, audio_path, freq, start_idx, sample_rate, output_dir=None):
     """Save spectrogram plot for the first chunk for verification purposes."""
     try:
         import matplotlib.pyplot as plt
@@ -55,7 +55,14 @@ def _save_first_chunk_spectrogram(chunk, log_spec, audio_path, freq, start_idx, 
         plt.colorbar(im, ax=ax2, label='Log Power')
         plt.tight_layout()
 
-        output_path = f"/tmp/first_chunk_spectrogram_{Path(audio_path).stem}.png"
+        # Save to output_dir/debug/ if provided, otherwise /tmp/
+        if output_dir:
+            debug_dir = Path(output_dir) / "debug"
+            debug_dir.mkdir(parents=True, exist_ok=True)
+            output_path = debug_dir / f"first_chunk_spectrogram_{Path(audio_path).stem}.png"
+        else:
+            output_path = f"/tmp/first_chunk_spectrogram_{Path(audio_path).stem}.png"
+
         plt.savefig(output_path, dpi=150, bbox_inches='tight')
         plt.close()
 
@@ -91,6 +98,7 @@ def extract_feature_spectrogram(
     kernel_size_ms: int = 25,
     stride_ms: int = 20,
     debug: bool = False,
+    output_dir: Optional[Union[str, Path]] = None,
 ) -> Tensor:
     r"""Extract 1ms resolution spectrogram features using soundsig.sound.spectrogram (Gaussian STFT)
     optimized for birdsong analysis, for KMeans clustering and pseudo label prediction.
@@ -139,7 +147,7 @@ def extract_feature_spectrogram(
 
         # Save spectrogram plot for first chunk only (for debugging/verification)
         if chunk_idx == 0 and debug:
-            _save_first_chunk_spectrogram(chunk, log_spec, path, freq, start_idx, sample_rate)
+            _save_first_chunk_spectrogram(chunk, log_spec, path, freq, start_idx, sample_rate, output_dir)
 
         # Extract 25ms windows from this chunk's spectrogram
         time_frames = log_spec.shape[1]
@@ -284,7 +292,7 @@ def dump_features(
             path, nsample = line.split("\t")
             path = f"{root}/{path}"
             if feature_type == "spectrogram":
-                feature = extract_feature_spectrogram(path, device, sample_rate, kernel_size_ms, stride_ms, debug)
+                feature = extract_feature_spectrogram(path, device, sample_rate, kernel_size_ms, stride_ms, debug, out_dir)
             else:
                 feature = extract_feature_hubert(path, device, sample_rate, model, layer_index)
             features.append(feature.cpu())
