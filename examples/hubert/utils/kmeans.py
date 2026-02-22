@@ -40,6 +40,12 @@ def load_feature(
         feat_path, len_path = _get_feat_lens_paths(feat_dir, split, rank, num_rank)
         feat = torch.load(feat_path)
         length = torch.load(len_path).int()
+
+        # Skip empty tensors (from ranks that had no files to process)
+        if feat.numel() == 0:
+            _LG.info(f"Skipping empty features from rank {rank}/{num_rank}")
+            continue
+
         if percent < 0:
             feats.append(feat)
             lens.append(length)
@@ -56,6 +62,10 @@ def load_feature(
             feat = torch.index_select(feat, 0, mask)
             feats.append(feat)
             lens.append(length[indices])
+
+    if len(feats) == 0:
+        raise ValueError(f"No features found in {feat_dir} for split '{split}'")
+
     feats = torch.cat(feats)
     lens = torch.cat(lens)
     return feats, lens
@@ -185,6 +195,12 @@ def get_km_label(
         feat_path, len_path = _get_feat_lens_paths(feat_dir, split, rank, num_rank)
         feats = torch.load(feat_path)
         length = torch.load(len_path).int()
+
+        # Skip empty tensors (from ranks that had no files to process)
+        if feats.numel() == 0:
+            _LG.info(f"Skipping empty features from rank {rank}/{num_rank}")
+            continue
+
         assert feats.shape[0] == length.sum()
         labels = apply_kmeans(feats.to(device))
         for i in range(length.shape[0]):
