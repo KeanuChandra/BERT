@@ -105,13 +105,25 @@ def _parse_args():
 
 
 def resample_and_save_audio(input_path: Path, output_path: Path, orig_freq: int, new_freq: int,
-                            low_freq=100, high_freq=8000, filter_order=5, rescale=False, chunk_size=10):
+                            low_freq=100, high_freq=7900, filter_order=5, rescale=False, chunk_size=10):
     waveform, sr = torchaudio.load(input_path)
 
     # Handle sample rate flexibility - don't assert strict match
     if sr != orig_freq:
         print(f"Warning: File {input_path} has sample rate {sr}, expected {orig_freq}. Using actual rate.")
         orig_freq = sr
+
+    # If already at target sample rate, just copy the file
+    if sr == new_freq:
+        print(f"File {input_path} already at {new_freq}Hz, copying without reprocessing.")
+        torchaudio.save(output_path, waveform, sr)
+        return
+
+    # Ensure high_freq doesn't exceed Nyquist
+    nyquist = orig_freq / 2
+    if high_freq >= nyquist:
+        high_freq = nyquist * 0.95  # Use 95% of Nyquist
+        print(f"Adjusted high_freq to {high_freq}Hz (95% of Nyquist {nyquist}Hz)")
 
     chunk_samples = orig_freq * chunk_size
     num_chunks = (waveform.size(1) + chunk_samples - 1) // chunk_samples  # Ceiling division

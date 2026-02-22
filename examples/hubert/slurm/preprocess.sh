@@ -9,12 +9,15 @@
 #SBATCH --output=preprocess_%j.log
 
 module load anaconda3
-source activate hubert_env
+source activate hubert_env_cpu
 
 echo "=============================================="
 echo "HuBERT Preprocessing"
 echo "=============================================="
 echo "Start time: $(date)"
+
+# Patch soundsig for scipy compatibility (safe to run multiple times)
+python /global/home/users/jonathanswang/pytorchAudio/examples/hubert/slurm/fix_soundsig.py
 
 # Verify environment
 python -c "
@@ -35,7 +38,7 @@ echo ""
 echo "Starting preprocessing..."
 
 python /global/home/users/jonathanswang/pytorchAudio/examples/hubert/preprocess.py \
-    --dataset short_zebra_finch \
+    --dataset ZF_test_pipeline \
     --root-dir /global/scratch/users/jonathanswang/dev \
     --feat-type spectrogram \
     --exp-dir /global/scratch/users/jonathanswang/temp_files/run2-6-26/ \

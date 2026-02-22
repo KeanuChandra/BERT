@@ -118,21 +118,29 @@ def extract_feature_spectrogram(
     # Process in 5-second chunks to handle very long audio files
     segment_length = 5  # seconds
     segment_samples = sample_rate * segment_length
-    total_duration = len(waveform) / sample_rate
 
     spec_sample_rate = 1000  # 1ms time resolution = 1000Hz sampling rate
     freq_spacing = 50  # Frequency resolution in Hz (good for birdsong analysis)
 
+    # Overlap between chunks to ensure seamless windowing at boundaries
+    # Need at least kernel_size_ms worth of overlap (in samples)
+    overlap_ms = kernel_size_ms  # 25ms overlap
+    overlap_samples = int(overlap_ms * sample_rate / 1000)  # 400 samples at 16kHz
+
     all_features = []
-    num_chunks = (len(waveform) + segment_samples - 1) // segment_samples
+    total_samples = len(waveform)
 
-    for chunk_idx in range(num_chunks):
-        # Extract 5-second chunk
-        start_idx = chunk_idx * segment_samples
-        end_idx = min(start_idx + segment_samples, len(waveform))
-        chunk = waveform[start_idx:end_idx]
+    # Track position in the global timeline for proper windowing
+    global_frame_offset = 0
+    chunk_idx = 0
+    chunk_start = 0
 
-        # Generate FULL spectrogram for this 5-second chunk
+    while chunk_start < total_samples:
+        # Extract chunk with overlap from previous chunk's end
+        chunk_end = min(chunk_start + segment_samples, total_samples)
+        chunk = waveform[chunk_start:chunk_end]
+
+        # Generate spectrogram for this chunk
         t, freq, timefreq, rms = spectrogram(
             chunk,
             sample_rate,
@@ -147,26 +155,55 @@ def extract_feature_spectrogram(
 
         # Save spectrogram plot for first chunk only (for debugging/verification)
         if chunk_idx == 0 and debug:
-            _save_first_chunk_spectrogram(chunk, log_spec, path, freq, start_idx, sample_rate, output_dir)
+            _save_first_chunk_spectrogram(chunk, log_spec, path, freq, chunk_start, sample_rate, output_dir)
 
         # Extract 25ms windows from this chunk's spectrogram
         time_frames = log_spec.shape[1]
         frames_per_window = kernel_size_ms  # 25ms = 25 frames
         frames_per_hop = stride_ms          # 20ms = 20 frames
 
-        # Extract overlapping windows: 0-25ms, 20-45ms, 40-65ms, etc.
+        # For chunks after the first, start at the correct stride-aligned position
+        # to avoid duplicates while not missing any windows
+        if chunk_idx == 0:
+            start_frame = 0
+        else:
+            # Find the first stride-aligned global window position that wasn't
+            # covered by the previous chunk.
+            # Global windows are at 0, stride_ms, 2*stride_ms, ... ms.
+            # This chunk starts at chunk_start_ms; we need the first global
+            # window >= chunk_start_ms + overlap_ms, rounded up to the next stride.
+            # Formula: start_frame = stride_ms - (chunk_start_ms % stride_ms),
+            #   using stride_ms when chunk_start_ms is already stride-aligned.
+            # Example (stride=20, overlap=25, step=4975ms):
+            #   Chunk 1 starts at 4975ms: r=15 -> start_frame=5  (global 4980ms)
+            #   Chunk 2 starts at 9950ms: r=10 -> start_frame=10 (global 9960ms)
+            #   Chunk 3 starts at 14925ms: r=5 -> start_frame=15 (global 14940ms)
+            #   Chunk 4 starts at 19900ms: r=0 -> start_frame=20 (global 19920ms)
+            chunk_start_ms = (chunk_start * 1000) // sample_rate
+            r = chunk_start_ms % stride_ms
+            start_frame = stride_ms - r if r != 0 else stride_ms
+
+        # Extract overlapping windows
         chunk_features = []
-        for start_frame in range(0, time_frames - frames_per_window + 1, frames_per_hop):
-            end_frame = start_frame + frames_per_window
+        for frame_pos in range(start_frame, time_frames - frames_per_window + 1, frames_per_hop):
+            end_frame = frame_pos + frames_per_window
 
             # Extract 25ms window from this chunk's spectrogram
-            window = log_spec[:, start_frame:end_frame]  # Shape: (freq_bins, 25)
+            window = log_spec[:, frame_pos:end_frame]  # Shape: (freq_bins, 25)
 
             # Flatten to vector for KMeans
             feature_vector = window.flatten()  # Shape: (freq_bins * 25,)
             chunk_features.append(feature_vector)
 
         all_features.extend(chunk_features)
+
+        # Move to next chunk, stepping back by overlap to maintain continuity
+        chunk_start = chunk_end - overlap_samples
+        chunk_idx += 1
+
+        # Prevent infinite loop if we're at the end
+        if chunk_end >= total_samples:
+            break
 
     if len(all_features) == 0:
         # Handle edge case of very short audio
@@ -282,11 +319,23 @@ def dump_features(
     with open(tsv_file, "r") as f:
         root = f.readline().rstrip()
         lines = [line.rstrip() for line in f]
-        start, end = 0, 0
-        if len(lines) == 1:
-            start, end = 0, 1
-        elif len(lines) != 0:
-            start, end = get_shard_range(len(lines), num_rank, rank)
+
+        num_files = len(lines)
+        if num_files == 0:
+            # No files to process
+            start, end = 0, 0
+        elif num_files < num_rank:
+            # Fewer files than ranks: only first num_files ranks get work
+            # Each rank gets at most 1 file, remaining ranks get nothing
+            if rank <= num_files:
+                start, end = rank - 1, rank  # rank is 1-indexed
+            else:
+                start, end = 0, 0  # This rank has nothing to do
+                _LG.info(f"Rank {rank} of {num_rank}: no files to process (only {num_files} files)")
+        else:
+            # Normal case: distribute files evenly across ranks
+            start, end = get_shard_range(num_files, num_rank, rank)
+
         lines = lines[start:end]
         for line in lines:
             path, nsample = line.split("\t")

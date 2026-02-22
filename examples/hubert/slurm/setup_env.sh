@@ -11,6 +11,11 @@
 
 module load anaconda3
 
+# Fix for NFS filesystem locking issues on Savio
+export CONDA_NO_LOCK=1
+export CONDA_PKGS_DIRS="/tmp/${USER}/conda_pkgs"
+mkdir -p "$CONDA_PKGS_DIRS"
+
 ENV_NAME="hubert_env"
 
 echo "=============================================="
@@ -36,7 +41,8 @@ conda install pytorch=2.2.2 torchvision torchaudio pytorch-cuda=12.1 -c pytorch 
 
 echo ""
 echo "=== Installing PyTorch Lightning ==="
-conda install -c conda-forge lightning torchmetrics -y
+# Using pip instead of conda - more reliable for lightning
+pip install lightning torchmetrics
 
 echo ""
 echo "=== Installing numerical libraries ==="
@@ -57,6 +63,10 @@ conda install -c conda-forge 'ffmpeg<7' -y
 echo ""
 echo "=== Installing soundsig (for spectrogram extraction) ==="
 pip install soundsig
+
+echo ""
+echo "=== Patching soundsig for scipy compatibility ==="
+python /global/home/users/jonathanswang/pytorchAudio/examples/hubert/slurm/fix_soundsig.py
 
 echo ""
 echo "=== Installing visualization libraries (optional) ==="
