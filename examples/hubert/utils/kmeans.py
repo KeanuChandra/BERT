@@ -15,7 +15,6 @@ from .common_utils import _get_feat_lens_paths, _get_model_path
 _LG = logging.getLogger(__name__)
 
 
-# normalize vectors?
 def load_feature(
     feat_dir: Path,
     split: str,
@@ -134,13 +133,20 @@ def learn_kmeans(
         num_rank,
         percent,
     )
+    feat_mean = feats.mean(dim=0)
+    feat_std = feats.std(dim=0)
+    feats = (feats - feat_mean) / (feat_std + 1e-8)
     feats = feats.numpy()
     km_model.fit(feats)
     km_path = _get_model_path(km_dir)
 
-    # Save cluster centers as torch tensor
     cluster_centers = torch.from_numpy(km_model.cluster_centers_)
-    torch.save({'cluster_centers': cluster_centers, 'n_clusters': n_clusters}, km_path)
+    torch.save({
+        'cluster_centers': cluster_centers,
+        'n_clusters': n_clusters,
+        'feat_mean': feat_mean,
+        'feat_std': feat_std,
+    }, km_path)
 
     inertia = -km_model.score(feats) / len(feats)
     _LG.info("Total intertia: %.5f", inertia)
@@ -151,11 +157,13 @@ class ApplyKmeans:
     def __init__(self, km_path, device):
         km_data = torch.load(km_path)
         cluster_centers = km_data['cluster_centers']
-
+        self.feat_mean = km_data['feat_mean'].to(device)
+        self.feat_std = km_data['feat_std'].to(device)
         self.C = cluster_centers.T.to(device)
         self.Cnorm = (self.C**2).sum(0, keepdim=True)
 
     def __call__(self, x):
+        x = (x - self.feat_mean) / (self.feat_std + 1e-8)
         dist = x.pow(2).sum(1, keepdim=True) - 2 * torch.matmul(x, self.C) + self.Cnorm
         return dist.argmin(dim=1).cpu()
 
