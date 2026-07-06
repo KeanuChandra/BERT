@@ -1,16 +1,16 @@
 import pandas as pd
+import torch  
 
 
 df = pd.read_csv("110504-000_clusters_metadata.csv")
 
+
 cluster_list = df["cluster"].astype(int).tolist()
 
-plain_text_clusters = " ".join(map(str, cluster_list))
+cluster_tensor = torch.tensor(cluster_list, dtype=torch.long)
 
 output_filename = "110504-000_clusters.pt"
-
-with open(output_filename, "w", encoding="utf-8") as f:
-    f.write(plain_text_clusters)
+torch.save(cluster_tensor, output_filename)
 
 print(f"Successfully converted {len(cluster_list)} cluster values!")
-print(f"Saved plain-text data masked as: {output_filename}")
+print(f"Saved a genuine binary PyTorch tensor to: {output_filename}")
