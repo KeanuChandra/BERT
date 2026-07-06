@@ -80,12 +80,12 @@ def chunk_dataset(audio_path, label_path, output_dir, segment_secs=10, sample_ra
         
     print(f"-> Manifest: {tsv_path}")
     print(f"-> Labels: {label_txt_path}")
-    print("🎉 Done!")
+    print("Done!")
 
 if __name__ == "__main__":
-    INPUT_AUDIO = r"C:\Users\oscar\Documents\BERT\BERT\SpectrogramBasedBERT\examples\hubert\my_mini_dataset\110504-000.wav"
-    INPUT_LABELS = r"C:\Users\oscar\Documents\BERT\BERT\SpectrogramBasedBERT\examples\hubert\my_mini_dataset\110504-000_clusters.pt"
-    OUTPUT_DATASET_DIR = r"C:\Users\oscar\Documents\BERT\BERT\SpectrogramBasedBERT\examples\hubert\output\my_mini_dataset"
+    INPUT_AUDIO = "C:/global/scratch/users/jelie/ZF_rec/train"
+    INPUT_LABELS = ""
+    OUTPUT_DATASET_DIR = "C:/global/scratch/users/keanumchandra/split_audio"
     
     chunk_dataset(
         audio_path=INPUT_AUDIO,
