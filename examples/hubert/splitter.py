@@ -83,9 +83,9 @@ def chunk_dataset(audio_path, label_path, output_dir, segment_secs=10, sample_ra
     print("Done!")
 
 if __name__ == "__main__":
-    INPUT_AUDIO = "C:/global/scratch/users/jelie/ZF_rec/train"
-    INPUT_LABELS = ""
-    OUTPUT_DATASET_DIR = "C:/global/scratch/users/keanumchandra/split_audio"
+    INPUT_AUDIO = "/global/scratch/users/jelie/ZF_rec/train/110504-000.wav"
+    INPUT_LABELS = "/global/home/users/keanumchandra/BERT/examples/hubert/110504-000_clusters.pt"
+    OUTPUT_DATASET_DIR = "/global/scratch/users/keanumchandra/split_audio"
     
     chunk_dataset(
         audio_path=INPUT_AUDIO,

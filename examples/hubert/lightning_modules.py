@@ -156,7 +156,7 @@ class HuBERTPreTrainModule(LightningModule):
                 feature_grad_mult=feature_grad_mult,
                 num_classes=num_classes,
                 mask_prob=self.MASK_PROB,
-                mask_length=self.MASK_LENGTH,
+                #mask_length=self.MASK_LENGTH,
                 mask_channel_length=self.MASK_CHANNEL_LENGTH,
             )
         elif model_name == "hubert_pretrain_large":
@@ -188,7 +188,9 @@ class HuBERTPreTrainModule(LightningModule):
     def _step(self, batch: Batch, batch_idx, step_type):
         if batch is None:
             return None, None
+
         waveforms, labels, audio_lengths = batch
+
         if step_type == "val":
             with torch.no_grad():
                 logit_m, logit_u, feature_penalty = self.model(
@@ -197,32 +199,54 @@ class HuBERTPreTrainModule(LightningModule):
                     audio_lengths,
                 )
         else:
+            with torch.no_grad():
+                # Fix: Changed 'lengths' to 'audio_lengths'
+                features, _ = self.model.wav2vec2.feature_extractor(waveforms, audio_lengths)
+                target_len = features.shape[1]
+
+            # Crop or pad labels to match target_len exactly
+            if labels.shape[1] > target_len:
+                labels = labels[:, :target_len]
+            elif labels.shape[1] < target_len:
+                labels = torch.nn.functional.pad(labels, (0, target_len - labels.shape[1]), value=0)
+
             logit_m, logit_u, feature_penalty = self.model(
                 waveforms,
                 labels,
                 audio_lengths,
             )
+
         loss = self.loss(logit_m, logit_u, feature_penalty)
+
         if not torch.isinf(loss) and not torch.isnan(loss):
-            self.log(f"{step_type}_loss", loss.item() / logit_m.size(0), on_step=True, on_epoch=True)
+            self.log(
+                f"{step_type}_loss",
+                loss,
+                on_step=True,
+                on_epoch=True,
+                batch_size=waveforms.size(0),
+                sync_dist=(step_type != "train"),
+            )
         else:
             self.nan_loss_count += 1
             self.log("nan_loss_count", self.nan_loss_count, on_step=True, on_epoch=True)
 
-        # log accuracies of masked and unmasked frames
+        # Log accuracies of masked and unmasked frames
         correct_m, count_m = _compute_accuracy(logit_m)
         correct_u, count_u = _compute_accuracy(logit_u)
+
         self.mask_stats[step_type]["correct"] += correct_m
         self.mask_stats[step_type]["count"] += count_m
         self.unmask_stats[step_type]["correct"] += correct_u
         self.unmask_stats[step_type]["count"] += count_u
+
         self.log(
             f"{step_type}_masked_accuracy",
             self.mask_stats[step_type]["correct"] / self.mask_stats[step_type]["count"],
             on_step=True,
             on_epoch=True,
             sync_dist=True,
-            prog_bar=step_type == "train",
+            prog_bar=(step_type == "train"),
         )
         self.log(
             f"{step_type}_unmasked_accuracy",
@@ -230,9 +254,10 @@ class HuBERTPreTrainModule(LightningModule):
             on_step=True,
             on_epoch=True,
             sync_dist=True,
-            prog_bar=step_type == "train",
+            prog_bar=(step_type == "train"),
         )
-        return loss, logit_m.size(0)
+
+        return loss, waveforms.size(0)
 
     def configure_optimizers(self):
         return (
@@ -466,31 +491,42 @@ class HuBERTFineTuneModule(LightningModule):
     def _step(self, batch: Batch_FineTune, batch_idx, step_type):
         if batch is None:
             return None
+
         waveforms, labels, audio_lengths, label_lengths = batch
-        if self.global_step <= self.freeze_encoder_updates:
-            with torch.no_grad():
-                x, out_len = self.model.wav2vec2.feature_extractor(waveforms, audio_lengths)
-                padding_mask = components._get_padding_mask(x, out_len)
-                x, attention_mask = self.model.wav2vec2.encoder._preprocess(x, out_len)
-                x, _ = self.model.mask_generator(x, padding_mask)
-                x = self.model.wav2vec2.encoder.transformer(x, attention_mask=attention_mask)
-        else:
-            with torch.no_grad():
-                x, out_len = self.model.wav2vec2.feature_extractor(waveforms, audio_lengths)
-                padding_mask = components._get_padding_mask(x, out_len)
+
+        # Feature extractor convolutional layers are always frozen
+        with torch.no_grad():
+            x, out_len = self.model.wav2vec2.feature_extractor(waveforms, audio_lengths)
+            padding_mask = components._get_padding_mask(x, out_len)
+
+        # Conditionally freeze the transformer encoder during warm-up steps
+        freeze_encoder = self.global_step <= self.freeze_encoder_updates
+        with torch.set_grad_enabled(not freeze_encoder):
             x, attention_mask = self.model.wav2vec2.encoder._preprocess(x, out_len)
             x, _ = self.model.mask_generator(x, padding_mask)
             x = self.model.wav2vec2.encoder.transformer(x, attention_mask=attention_mask)
+
+        # Projection layer & Logits
         logits = self.aux(x)
-        log_probs = F.log_softmax(logits, dim=-1)
-        log_probs = log_probs.transpose(0, 1)
+        log_probs = F.log_softmax(logits, dim=-1).transpose(0, 1)  # (T, N, C) for CTCLoss
+
         loss = self.loss_fn(
             log_probs,
             labels,
             out_len,
             label_lengths,
         )
-        self.log(f"{step_type}_loss", loss.item() / waveforms.size(0), on_step=True, on_epoch=True)
+
+        # PyTorch Lightning Logging
+        self.log(
+            f"{step_type}_loss",
+            loss,
+            on_step=True,
+            on_epoch=True,
+            batch_size=waveforms.size(0),
+            sync_dist=(step_type != "train"),
+        )
+
         return loss
 
     def configure_optimizers(self):
